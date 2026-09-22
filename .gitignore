@@ -1,0 +1,5 @@
+*.so
+*.h
+dist/
+*.test
+.DS_Store
