@@ -169,6 +169,47 @@ func TestHandleManagementServesPanelAnd404sUnknown(t *testing.T) {
 	}
 }
 
+// TestPanelSharesCPAThemeContract guards the theming agreement the sibling
+// plugin panels (workbuddy, qoder, cline) all rely on: CPA drives its theme
+// through a data-theme attribute on the document element, so an embedded panel
+// must read that attribute from the parent and re-sync on change. A panel that
+// only answers prefers-color-scheme renders light inside a dark CPA panel, and
+// the token names have to match so a CPA theme change reaches this page.
+func TestPanelSharesCPAThemeContract(t *testing.T) {
+	setResourceBasePath("/v0/resource/plugins/model-order")
+	raw, errHandle := handleManagement(marshalWire(t, http.MethodGet, "/v0/resource/plugins/model-order/panel", nil))
+	page := unwrapMgmt(t, raw, errHandle, nil)
+	html := string(page.Body)
+
+	for _, want := range []string{
+		`data-theme`,
+		`:root[data-theme="dark"]`,
+		`window.__moThemeSync`,
+		`window.parent.document`,
+		`cli-proxy-theme`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("panel lost the CPA theme contract, missing %q", want)
+		}
+	}
+
+	// Token names shared with the other panels. A rename here silently drops the
+	// page back to its own palette and it stops matching the rest of the UI.
+	for _, token := range []string{"--bg:", "--card:", "--border:", "--fg:", "--mut:", "--acc:", "--ok:", "--warn:", "--err:"} {
+		if !strings.Contains(html, token) {
+			t.Fatalf("panel is missing shared theme token %q", token)
+		}
+	}
+
+	// The sync has to actually run, not just exist.
+	if !strings.Contains(html, "__moThemeSync()") {
+		t.Fatal("panel never invokes the theme sync")
+	}
+	if strings.Contains(html, "@media (prefers-color-scheme: dark){\n  :root{--bg:#16181c") {
+		t.Fatal("panel still carries the old standalone dark palette")
+	}
+}
+
 func marshalWire(t *testing.T, method, path string, body []byte) []byte {
 	t.Helper()
 	raw, err := json.Marshal(managementRequestWire{

@@ -3,70 +3,144 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>模型排序</title>
 <style>
+/* Theme tokens shared with the CPA management panel and the sibling plugin
+   panels (workbuddy / qoder / cline). The theme is chosen by a data-theme
+   attribute on <html> so an embedded iframe can follow the CPA parent, which a
+   bare prefers-color-scheme query cannot do. */
 :root{
-  --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#1c2126; --muted:#6b7480;
-  --accent:#2f6feb; --ok:#1a7f4b; --warn:#9a6700; --bad:#b42318; --chip:#eef1f5;
+  --bg:#faf9f5;--card:#ffffff;--border:#e3e1db;--fg:#2d2a26;--mut:#6d6760;
+  --acc:#4c8dff;--on-acc:#ffffff;--ok:#10b981;--warn:#e0aa14;--err:#c65746;
+  --surface:#f0eee8;--surface-muted:#e9e6df;--btn-sec:#eef1f6;--btn-sec-hover:#e4e8ef;
+  --input-bg:#ffffff;--code-bg:#f3f4f6;--code-fg:#374151;--placeholder:rgba(109,103,96,.55);
+  --ok-soft:rgba(16,185,129,.10);--ok-border:rgba(16,185,129,.30);
+  --warn-soft:rgba(224,170,20,.12);--warn-border:rgba(224,170,20,.32);
+  --err-soft:rgba(198,87,70,.10);--err-border:rgba(198,87,70,.30);
+  --mut-soft:rgba(109,103,96,.12);--mut-border:rgba(109,103,96,.28);
+  --toast-shadow:0 10px 28px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.04);
+  --acc-ring:rgba(76,141,255,.18);--radius-md:12px;--radius-lg:16px;
+  color-scheme:light
 }
-@media (prefers-color-scheme: dark){
-  :root{--bg:#16181c; --panel:#1e2126; --line:#2e3238; --ink:#e7eaee; --muted:#98a1ac;
-    --accent:#6aa0ff; --chip:#272b31; --ok:#4cc38a; --warn:#d6a728; --bad:#f5645c;}
+:root[data-theme="white"]{
+  --bg:#f5f5f5;--card:#ffffff;--border:#e6e6e6;--fg:#1f1f1f;--mut:#707070;
+  --surface:#fafafa;--surface-muted:#efefef;--btn-sec:#f0f0f0;--btn-sec-hover:#e8e8e8;
+  --input-bg:#ffffff;--code-bg:#f3f4f6;--code-fg:#374151;--placeholder:rgba(112,112,112,.55);
+  --toast-shadow:0 10px 28px rgba(0,0,0,.10),0 0 0 1px rgba(0,0,0,.04);
+  color-scheme:light
+}
+:root[data-theme="dark"]{
+  --bg:#1e1d1b;--card:#26241f;--border:#3a3833;--fg:#ede9e3;--mut:#9a948c;
+  --acc:#4c8dff;--on-acc:#ffffff;--ok:#34d399;--warn:#f0c050;--err:#e07a6a;
+  --surface:#2f2d28;--surface-muted:#35332e;--btn-sec:#35332e;--btn-sec-hover:#3f3c36;
+  --input-bg:#1e1d1b;--code-bg:#35332e;--code-fg:#d6d1c9;--placeholder:rgba(154,148,140,.55);
+  --ok-soft:rgba(52,211,153,.12);--ok-border:rgba(52,211,153,.38);
+  --warn-soft:rgba(240,192,80,.14);--warn-border:rgba(240,192,80,.38);
+  --err-soft:rgba(224,122,106,.12);--err-border:rgba(224,122,106,.38);
+  --mut-soft:rgba(154,148,140,.16);--mut-border:rgba(154,148,140,.32);
+  --toast-shadow:0 10px 28px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03);
+  --acc-ring:rgba(76,141,255,.28);
+  color-scheme:dark
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);
-  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
-header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);
-  padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-header h1{font-size:14px;margin:0;font-weight:600;letter-spacing:.01em}
-.ver{color:var(--muted);font-size:11px}
+html,body{max-width:100%;overflow-x:hidden}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+code,.name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--border);
+  padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+header h1{font-size:16px;margin:0;font-weight:600}
+.ver{color:var(--mut);font-size:12px}
 .spacer{flex:1 1 auto}
-main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;padding:14px 16px;max-width:1500px;margin:0 auto}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;padding:16px;max-width:1500px;margin:0 auto}
 @media (max-width:980px){main{grid-template-columns:minmax(0,1fr)}}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
-.card>h2{margin:0;padding:9px 12px;font-size:12px;font-weight:600;border-bottom:1px solid var(--line);
-  display:flex;align-items:center;gap:8px;background:linear-gradient(180deg,rgba(0,0,0,.012),transparent)}
-.card>h2 .hint{font-weight:400;color:var(--muted);font-size:11px}
-.bar{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.body{padding:8px 12px;overflow:auto;max-height:60vh}
-button{font:inherit;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;
-  padding:4px 9px;cursor:pointer}
-button:hover{border-color:#b9c2cd}
-button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button.primary:hover{filter:brightness(1.06)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);
+  overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.card>h2{margin:0;padding:12px 14px;font-size:14px;font-weight:600;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.card>h2 .hint{font-weight:400;color:var(--mut);font-size:12px}
+.bar{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.body{padding:10px 14px;overflow:auto;max-height:60vh}
+.note{color:var(--mut);font-size:12px;padding:8px 14px;border-top:1px solid var(--border);background:var(--surface)}
+button{font:inherit;font-size:13px;background:var(--btn-sec);color:var(--fg);border:1px solid var(--border);
+  border-radius:8px;padding:7px 12px;cursor:pointer;white-space:nowrap}
+button:hover{background:var(--btn-sec-hover)}
+button.primary{background:var(--acc);border-color:var(--acc);color:var(--on-acc)}
+button.primary:hover{filter:brightness(1.05)}
+button:focus-visible{outline:2px solid var(--acc-ring);outline-offset:2px}
 button:disabled{opacity:.5;cursor:not-allowed}
-button.mini{padding:1px 6px;font-size:11px;line-height:1.5}
-input[type=text],input[type=search],select{font:inherit;background:var(--panel);color:var(--ink);
-  border:1px solid var(--line);border-radius:6px;padding:4px 7px;min-width:0}
+button.mini{padding:3px 8px;font-size:12px;line-height:1.4}
+input[type=text],input[type=search],input[type=password],select{font:inherit;font-size:13px;
+  background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:8px;
+  padding:7px 10px;min-width:0;max-width:100%}
+input::placeholder{color:var(--placeholder)}
 input.grow{flex:1 1 160px}
-label.chk{display:flex;align-items:center;gap:5px;color:var(--muted);user-select:none}
-.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
-.seg button{border:0;border-radius:0;padding:4px 10px;background:var(--panel)}
-.seg button.on{background:var(--accent);color:#fff}
-.chip{display:inline-block;background:var(--chip);border-radius:4px;padding:0 6px;font-size:11px;color:var(--muted)}
-.chip.hit{color:var(--ok)}
-.chip.none{color:var(--warn)}
-.row{display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(128,128,128,.12)}
+label.chk{display:flex;align-items:center;gap:6px;color:var(--mut);user-select:none;font-size:13px}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:7px 12px;background:var(--card)}
+.seg button.on{background:var(--acc);color:var(--on-acc)}
+.chip{display:inline-block;background:var(--mut-soft);border:1px solid var(--mut-border);border-radius:99px;
+  padding:2px 9px;font-size:11px;font-weight:600;color:var(--mut);white-space:nowrap}
+.chip.hit{color:var(--ok);background:var(--ok-soft);border-color:var(--ok-border)}
+.chip.none{color:var(--warn);background:var(--warn-soft);border-color:var(--warn-border)}
+.row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed var(--border);min-width:0}
 .row:last-child{border-bottom:0}
-.idx{width:22px;text-align:right;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
-.name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
-.empty{color:var(--muted);padding:14px 2px;font-size:12px}
-ol.rules{margin:0;padding:0;list-style:none;counter-reset:r}
-ul.models{margin:0;padding:0;list-style:none}
-ul.models li{display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(128,128,128,.12)}
+.row input{flex:1 1 120px}
+.idx{width:22px;text-align:right;color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums;flex:0 0 auto}
+.name{font-size:12px;overflow-wrap:anywhere;min-width:0}
+.empty{color:var(--mut);padding:16px 2px;font-size:13px;text-align:center}
+ol.rules,ul.models{margin:0;padding:0;list-style:none}
+ul.models li{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed var(--border);min-width:0}
 ul.models li:last-child{border-bottom:0}
-ul.models li.pick{background:rgba(47,111,235,.07)}
-.flag{margin-left:auto;display:flex;gap:4px;opacity:0;transition:opacity .1s}
+ul.models li.pick{background:var(--acc-ring);border-radius:6px}
+.flag{margin-left:auto;display:flex;gap:4px;opacity:0;transition:opacity .1s;flex:0 0 auto}
 ul.models li:hover .flag,li.pick .flag{opacity:1}
-#auth{padding:10px 16px;background:#fff7e6;border-bottom:1px solid var(--line);display:none;gap:8px;align-items:center}
-@media (prefers-color-scheme: dark){#auth{background:#332700}}
-#toasts{position:fixed;right:14px;bottom:14px;display:flex;flex-direction:column;gap:8px;z-index:20}
-.toast{background:var(--ink);color:var(--bg);padding:8px 12px;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.18);
-  max-width:340px;font-size:12px}
-.toast.err{background:var(--bad);color:#fff}
-.toast.ok{background:var(--ok);color:#fff}
-.note{color:var(--muted);font-size:11px;padding:6px 12px;border-top:1px solid var(--line)}
+#auth{padding:10px 16px;background:var(--warn-soft);border-bottom:1px solid var(--warn-border);
+  color:var(--warn);display:none;gap:8px;align-items:center;flex-wrap:wrap}
+#toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:9999;max-width:360px}
+.toast{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--acc);
+  border-radius:var(--radius-md);padding:12px 16px;font-size:13px;box-shadow:var(--toast-shadow);
+  transform:translateX(120%);opacity:0;transition:transform .3s cubic-bezier(.2,.9,.3,1.1),opacity .25s;
+  cursor:pointer;word-break:break-all}
+.toast.show{transform:translateX(0);opacity:1}
+.toast.ok{border-left-color:var(--ok);background:var(--ok-soft)}
+.toast.err{border-left-color:var(--err);background:var(--err-soft)}
+@media (max-width:640px){
+  header{padding:10px 12px}main{padding:12px;gap:12px}
+  .flag{opacity:1}
+}
 </style>
+<script>
+/* Early theme sync: follow the CPA parent theme when embedded, else the OS
+   preference. Same semantics as the workbuddy, qoder and cline panels. */
+(function(){
+  var ATTR="data-theme";
+  function embedded(){try{return window.self!==window.top}catch(e){return false}}
+  function apply(t){var el=document.documentElement;if(t==="white"||t==="dark")el.setAttribute(ATTR,t);else el.removeAttribute(ATTR)}
+  function parentTheme(){
+    if(!embedded())return null;
+    try{var raw=window.parent.document.documentElement.getAttribute(ATTR);if(raw==="white"||raw==="dark")return raw;return "light"}catch(e){return null}
+  }
+  function systemTheme(){try{return window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}catch(e){return "light"}}
+  function sync(){apply(parentTheme()||systemTheme())}
+  sync();
+  window.__moThemeSync=function(){
+    sync();
+    if(!embedded()){
+      try{var mq=window.matchMedia("(prefers-color-scheme: dark)");var on=function(){sync()};if(mq.addEventListener)mq.addEventListener("change",on);else if(mq.addListener)mq.addListener(on)}catch(e){}
+      return;
+    }
+    try{
+      var parentEl=window.parent.document.documentElement;
+      new MutationObserver(sync).observe(parentEl,{attributes:true,attributeFilter:[ATTR]});
+      window.addEventListener("storage",function(e){if(e.key==="cli-proxy-theme")sync()});
+    }catch(e){}
+  };
+})();
+</script>
 </head>
 <body>
 <header>
@@ -127,6 +201,10 @@ ul.models li:hover .flag,li.pick .flag{opacity:1}
 </main>
 
 <div id="toasts"></div>
+
+<footer class="note" style="border-top:0;background:transparent;text-align:center;padding:4px 16px 20px">
+  管理接口：<code id="apiPath"></code>
+</footer>
 
 <script>
 const MANAGEMENT_BASE_PATH = "__MO_MANAGEMENT_BASE_PATH_JSON__";
@@ -200,7 +278,12 @@ function toast(kind, msg){
   el.className = "toast" + (kind === "err" ? " err" : kind === "ok" ? " ok" : "");
   el.textContent = msg;
   box.appendChild(el);
-  setTimeout(() => el.remove(), kind === "err" ? 6000 : 3200);
+  // The shared panel toast style animates in through .show, so the class has to
+  // land a frame after insertion. Clicking dismisses early, as in the siblings.
+  requestAnimationFrame(() => el.classList.add("show"));
+  const life = setTimeout(dismiss, kind === "err" ? 6000 : 3200);
+  function dismiss(){ clearTimeout(life); el.remove(); }
+  el.addEventListener("click", dismiss);
 }
 
 /* ---- 状态 ---- */
@@ -460,6 +543,8 @@ $("btnSave").addEventListener("click", async () => {
 });
 
 async function boot(){
+  if(window.__moThemeSync) window.__moThemeSync();
+  $("apiPath").textContent = API;
   try { await load(); }
   catch (e) { toast("err", e.message); if (!getKey()) showAuth(); }
 }
