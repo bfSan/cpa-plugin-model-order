@@ -1,4 +1,4 @@
-.PHONY: build test lint clean
+.PHONY: build test lint clean tag
 
 GO ?= go
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo "dev")
@@ -17,3 +17,8 @@ lint:
 
 clean:
 	rm -f model-order.so model-order.h
+
+# Tag a release from the VERSION file (usage: make tag).
+tag:
+	git tag -a v$(VERSION) -m "v$(VERSION)"
+	git push origin v$(VERSION)
