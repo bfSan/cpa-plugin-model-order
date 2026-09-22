@@ -118,6 +118,27 @@ emptied or corrupted by an ordering bug.
 
 ## Coverage
 
-All three listing formats are handled: the OpenAI port (`{"object":"list","data":[…]}`
-with `id`), the Anthropic port (`data` with `id`) and the Gemini port
-(`{"models":[…]}` with `name`).
+Every listing format CPA serves is ordered by the same configured pattern list, so
+one rule covers all clients:
+
+| Port | Shape | Entry identity |
+|---|---|---|
+| `/v1/models` | `{"object":"list","data":[…]}` | `id` |
+| `/v1/models` with `Anthropic-Version` | `{"data":[…]}` | `id` |
+| `/v1/models?client_version=…` | `{"models":[…]}` | `slug` |
+| `/v1beta/models` | `{"models":[…]}` | `name`, minus its `models/` prefix |
+
+The `models/` prefix the Gemini port puts on every name is a resource path, not
+part of the model identity, so it is stripped before matching. Without that, a
+prefix pattern such as `gpt-*` would silently match only on the OpenAI port.
+
+### Anthropic port and model cloaking
+
+On the Anthropic port CPA replaces model IDs with cloaked names, for example
+`claude-fable-5-dd-2-egami-tpg`. Patterns cannot recognise a bucket in a cloaked
+ID, so that port falls back to alphabetical order over the cloaked names. It is
+still deterministic, which is the main fix, but grouping needs real IDs.
+
+CPA has a native switch for this: set `claude-code.disable-cloaking-model-list:
+true` and the port serves real IDs, at which point the configured order applies
+there too.

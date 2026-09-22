@@ -36,8 +36,29 @@ func TestParseModelListGeminiFormatUsesName(t *testing.T) {
 	if errParse != nil {
 		t.Fatalf("parse failed: %v", errParse)
 	}
-	if got := modelItemKey(list.elements[0]); got != "models/zeta" {
-		t.Fatalf("want models/zeta, got %q", got)
+	// The "models/" resource prefix is stripped so configured patterns behave the
+	// same on this port as on the OpenAI one.
+	if got := modelItemKey(list.elements[0]); got != "zeta" {
+		t.Fatalf("want zeta, got %q", got)
+	}
+}
+
+// TestGeminiPortHonoursPrefixPatterns is the regression for the resource prefix:
+// without stripping it, "gpt-*" only ever matched on the OpenAI port.
+func TestGeminiPortHonoursPrefixPatterns(t *testing.T) {
+	if err := loadConfig(nil); err != nil {
+		t.Fatalf("defaults must load cleanly: %v", err)
+	}
+	body := []byte(`{"models":[` +
+		`{"name":"models/workbuddy-hy3"},{"name":"models/gpt-6-astra"},{"name":"models/qoder-auto"}` +
+		`]}`)
+	out, changed := orderBody(body)
+	if !changed {
+		t.Fatal("expected gemini listing to be reordered")
+	}
+	want := []byte(`{"models":[{"name":"models/qoder-auto"},{"name":"models/gpt-6-astra"},{"name":"models/workbuddy-hy3"}]}`)
+	if string(out) != string(want) {
+		t.Fatalf("got  %s\nwant %s", out, want)
 	}
 }
 

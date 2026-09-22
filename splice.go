@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 // listKeys are the top level JSON keys that hold the model array in the three
@@ -180,9 +181,15 @@ func allModelItems(items [][]byte) bool {
 	return true
 }
 
-// modelItemKey returns the identity an entry is listed under. The OpenAI and
-// Anthropic ports use "id", the Gemini port uses "name" (for example
-// "models/gemini-2.5-pro"), and the Codex client catalog, served from
+// geminiNamePrefix is the resource path the Gemini port puts in front of every
+// model name. It is not part of the model identity, and leaving it in place
+// would make a configured prefix pattern such as "gpt-*" fail only on that port.
+const geminiNamePrefix = "models/"
+
+// modelItemKey returns the identity an entry is listed under, normalised so one
+// configured pattern list behaves the same on every port. The OpenAI and
+// Anthropic ports use "id", the Gemini port uses "name" prefixed with
+// "models/", and the Codex client catalog, served from
 // /v1/models?client_version=..., names its entries with "slug".
 func modelItemKey(item []byte) string {
 	var entry struct {
@@ -197,7 +204,7 @@ func modelItemKey(item []byte) string {
 		return entry.ID
 	}
 	if entry.Name != "" {
-		return entry.Name
+		return strings.TrimPrefix(entry.Name, geminiNamePrefix)
 	}
 	return entry.Slug
 }

@@ -17,6 +17,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARCHIVE="$(mktemp -t model-order.XXXXXX).tar.gz"
 trap 'rm -f "$ARCHIVE"' EXIT
 
+PLUGIN_VERSION="${PLUGIN_VERSION:-$(cat "$REPO_ROOT/VERSION" 2>/dev/null || echo dev)}"
+echo "==> version $PLUGIN_VERSION"
+
 echo "==> packaging HEAD from $REPO_ROOT"
 git -C "$REPO_ROOT" archive --format=tar.gz --prefix=cpa-plugin-model-order/ -o "$ARCHIVE" HEAD
 
@@ -34,7 +37,7 @@ sudo tar -xzf /tmp/model-order-src.tar.gz -C $(dirname $SRC_DIR)
 cd $SRC_DIR
 sudo env PATH=/usr/local/go/bin:\$PATH HOME=\$HOME go test -count=1 ./...
 sudo env PATH=/usr/local/go/bin:\$PATH HOME=\$HOME CGO_ENABLED=1 go build -trimpath -buildmode=c-shared \
-  -ldflags '-s -w' -o /tmp/model-order.so .
+  -ldflags '-s -w -X main.version=$PLUGIN_VERSION' -o /tmp/model-order.so .
 file /tmp/model-order.so"
 
 echo "==> installing and restarting $SERVICE"
