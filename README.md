@@ -137,6 +137,23 @@ gpt-*
 codex-*
 ```
 
+### What the panel does not edit
+
+The panel owns three keys and nothing else: `strategy`, `order` and
+`case_sensitive`. Model naming and cloaking stay hand written in CPA's own config,
+because this plugin reads the list after those rewrites and has no business
+changing them:
+
+* `oauth-model-alias` per auth, which decides whether a client sees `auto` or
+  `qoder-auto`.
+* `claude-code.disable-cloaking-model-list`, which decides whether the Anthropic
+  port serves cloaked IDs or real ones.
+
+The practical consequence for ordering: a pattern matches whatever name the alias
+or cloaking step produced, so rename first, then order. The panel's model list
+shows the names as clients actually receive them, which is the quickest way to
+check which spelling a given ID reached in.
+
 ## Safety
 
 The plugin is deliberately conservative: a model listing it cannot parse with
