@@ -189,6 +189,24 @@ or cloaking step produced, so rename first, then order. The panel's model list
 shows the names as clients actually receive them, which is the quickest way to
 check which spelling a given ID reached in.
 
+## Saving from the panel needs a writable config.yaml
+
+The panel persists through CPA, so CPA itself has to be able to write its own
+config file. If `config.yaml` is not writable by the user the CPA process runs as,
+`PATCH /v0/management/plugins/model-order/config` fails with HTTP 500 and the panel
+reports 保存失败, even though the rule and the key are both fine.
+
+This is easy to cause by editing the file with `sudo tee` or `sudo mv`, which leaves
+it owned by root while CPA runs as a normal user. Check with:
+
+```bash
+ls -l /opt/cpa/config.yaml                       # owner must match the CPA user
+sudo -u <cpa-user> test -w /opt/cpa/config.yaml && echo writable
+```
+
+Hand editing the YAML is still supported and needs no write permission at runtime,
+but it takes a restart instead of a hot reload.
+
 ## Safety
 
 The plugin is deliberately conservative: a model listing it cannot parse with
