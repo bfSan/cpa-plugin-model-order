@@ -182,11 +182,13 @@ func allModelItems(items [][]byte) bool {
 
 // modelItemKey returns the identity an entry is listed under. The OpenAI and
 // Anthropic ports use "id", the Gemini port uses "name" (for example
-// "models/gemini-2.5-pro").
+// "models/gemini-2.5-pro"), and the Codex client catalog, served from
+// /v1/models?client_version=..., names its entries with "slug".
 func modelItemKey(item []byte) string {
 	var entry struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
+		Slug string `json:"slug"`
 	}
 	if err := json.Unmarshal(item, &entry); err != nil {
 		return ""
@@ -194,7 +196,10 @@ func modelItemKey(item []byte) string {
 	if entry.ID != "" {
 		return entry.ID
 	}
-	return entry.Name
+	if entry.Name != "" {
+		return entry.Name
+	}
+	return entry.Slug
 }
 
 // render rejoins the elements back into the document.
