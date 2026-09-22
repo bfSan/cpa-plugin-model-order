@@ -194,6 +194,20 @@ func TestPanelSharesCPAThemeContract(t *testing.T) {
 		}
 	}
 
+	// CPA floats its own toolbar over the top right of the plugin frame, so the
+	// action buttons must live in the page body rather than the header.
+	header := html
+	if i := strings.Index(html, "<header>"); i >= 0 {
+		if j := strings.Index(html[i:], "</header>"); j >= 0 {
+			header = html[i : i+j]
+		}
+	}
+	for _, id := range []string{"btnSave", "btnDefault", "btnGen"} {
+		if strings.Contains(header, `id="`+id+`"`) {
+			t.Fatalf("%s must not sit in the header, where CPA's toolbar overlaps it", id)
+		}
+	}
+
 	// Token names shared with the other panels. A rename here silently drops the
 	// page back to its own palette and it stops matching the rest of the UI.
 	for _, token := range []string{"--bg:", "--card:", "--border:", "--fg:", "--mut:", "--acc:", "--ok:", "--warn:", "--err:"} {
