@@ -61,15 +61,15 @@ func TestStatusPayloadReportsRuleAndCatalog(t *testing.T) {
 	if payload["strategy"] != StrategyGrouped {
 		t.Fatalf("unexpected strategy %v", payload["strategy"])
 	}
-	if payload["from_config"] != true {
+	if payload["configured"] != true {
 		t.Fatal("an order taken from config must be reported as configured")
 	}
 	ordered, ok := payload["order"].([]string)
 	if !ok || len(ordered) != 1 || ordered[0] != "gpt-*" {
 		t.Fatalf("unexpected order %v", payload["order"])
 	}
-	if defaults, ok := payload["default_order"].([]string); !ok || len(defaults) == 0 {
-		t.Fatalf("default_order must be exposed for the reset button, got %v", payload["default_order"])
+	if suggested, ok := payload["suggested_order"].([]string); !ok || len(suggested) == 0 {
+		t.Fatalf("suggested_order must be exposed for the template button, got %v", payload["suggested_order"])
 	}
 	if catalogs, ok := payload["catalogs"].([]catalogSnapshot); !ok || len(catalogs) == 0 {
 		t.Fatalf("catalogs missing: %v", payload["catalogs"])
@@ -155,11 +155,12 @@ func TestHandleManagementServesPanelAnd404sUnknown(t *testing.T) {
 	if strings.Contains(html, "__MO_MANAGEMENT_BASE_PATH_JSON__") {
 		t.Fatal("management base path placeholder was not injected")
 	}
-	// The page sets MANAGEMENT_BASE_PATH from the host supplied prefix, quoted as
-	// a JS string literal. Checking both halves keeps the assertion insensitive to
-	// how the template happens to space the assignment.
-	if !strings.Contains(html, "const MANAGEMENT_BASE_PATH") || !strings.Contains(html, `"/v0/management"`) {
-		t.Fatalf("management base path was not stamped into the panel")
+	// The host injects a quoted JS literal, so the template must not wrap the
+	// placeholder in its own quotes. This has to be an exact line match: a
+	// substring check still passes on the broken `""/v0/management""` output,
+	// which is a JS syntax error that blanks the whole panel.
+	if want := "\nconst MANAGEMENT_BASE_PATH = \"/v0/management\";"; !strings.Contains(html, want) {
+		t.Fatalf("panel did not stamp a valid MANAGEMENT_BASE_PATH literal")
 	}
 
 	raw, errHandle = handleManagement(marshalWire(t, http.MethodGet, "/v0/management/plugins/model-order/nope", nil))

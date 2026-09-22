@@ -10,9 +10,7 @@ import (
 // {"models":[...]} where each entry is keyed by "slug" and carries deeply nested
 // template metadata. It is the shape Codex CLI and Codex++ actually read.
 func TestCodexClientCatalogReordered(t *testing.T) {
-	if err := loadConfig(nil); err != nil {
-		t.Fatalf("defaults must load cleanly: %v", err)
-	}
+	loadSuggested(t)
 	body := []byte(`{"models":[` +
 		`{"slug":"workbuddy-hy3","display_name":"Hy3","model_messages":{"instructions":"a } quoted, bracket [ here"},"supported_reasoning_levels":[{"effort":"low"}],"priority":3},` +
 		`{"slug":"gpt-6-astra","display_name":"Astra","model_messages":{"instructions":"b"},"priority":1}` +
@@ -60,9 +58,7 @@ func TestCodexClientCatalogReordered(t *testing.T) {
 // are moved as original bytes, float and large integer formatting from CPA is
 // never re-rendered through Go's JSON encoder.
 func TestCatalogNumbersKeepExactFormat(t *testing.T) {
-	if err := loadConfig(nil); err != nil {
-		t.Fatalf("defaults must load cleanly: %v", err)
-	}
+	loadSuggested(t)
 	body := []byte(`{"models":[` +
 		`{"slug":"zeta","context_window":272000,"ratio":0.30,"exp":1e2},` +
 		`{"slug":"alpha","context_window":272000,"ratio":0.30,"exp":1e2}` +

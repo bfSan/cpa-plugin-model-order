@@ -46,9 +46,7 @@ func TestParseModelListGeminiFormatUsesName(t *testing.T) {
 // TestGeminiPortHonoursPrefixPatterns is the regression for the resource prefix:
 // without stripping it, "gpt-*" only ever matched on the OpenAI port.
 func TestGeminiPortHonoursPrefixPatterns(t *testing.T) {
-	if err := loadConfig(nil); err != nil {
-		t.Fatalf("defaults must load cleanly: %v", err)
-	}
+	loadSuggested(t)
 	body := []byte(`{"models":[` +
 		`{"name":"models/workbuddy-hy3"},{"name":"models/gpt-6-astra"},{"name":"models/qoder-auto"}` +
 		`]}`)

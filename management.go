@@ -114,19 +114,20 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 }
 
-// statusPayload reports both the effective rule and whether it came from config,
-// so the panel can tell "you set this" apart from "built-in default".
+// statusPayload reports the effective rule plus whether it is configured at all.
+// With no built-in fallback, an unconfigured plugin groups nothing, and the panel
+// has to say so plainly rather than dress an empty list up as a default.
+// suggested_order is the editor template and is never applied on its own.
 func statusPayload() map[string]any {
 	cfg := currentConfig()
-	configured := orderConfigured()
 	return map[string]any{
-		"version":        version,
-		"strategy":       cfg.strategy,
-		"case_sensitive": cfg.caseSensitive,
-		"order":          cfg.order,
-		"from_config":    configured,
-		"default_order":  append([]string(nil), defaultOrder...),
-		"catalogs":       catalog.list(),
+		"version":         version,
+		"strategy":        cfg.strategy,
+		"case_sensitive":  cfg.caseSensitive,
+		"order":           cfg.order,
+		"configured":      len(cfg.order) > 0,
+		"suggested_order": append([]string(nil), suggestedOrder...),
+		"catalogs":        catalog.list(),
 	}
 }
 

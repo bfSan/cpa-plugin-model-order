@@ -57,6 +57,7 @@ func TestMatchersAreCaseInsensitiveByDefault(t *testing.T) {
 }
 
 func TestComparerOrdersBucketsThenAlphabetical(t *testing.T) {
+	loadSuggested(t)
 	cfg := currentConfig()
 	less := comparer(cfg.strategy, cfg.matchers, cfg.caseSensitive)
 	ids := []string{

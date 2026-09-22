@@ -20,24 +20,25 @@ type activeConfig struct {
 	strategy      string
 	caseSensitive bool
 	matchers      []matcher
-	// order echoes the effective pattern list, for the status route.
+	// order echoes the effective pattern list, for the status route. It is empty
+	// unless config supplied one: there is no built-in fallback.
 	order []string
-	// fromConfig records whether the pattern list came from plugin config rather
-	// than the built-in defaults. The panel shows the difference so a user can
-	// tell their own rule apart from the shipped one.
+	// fromConfig records whether the pattern list came from plugin config. Since
+	// config is the only source, this is effectively "is grouping enabled", which
+	// is what the panel's status chip reports.
 	fromConfig bool
 }
 
 var configStore atomic.Pointer[activeConfig]
 
-// loadConfig installs a configuration snapshot, falling back to the built-in
-// defaults when the host supplies nothing usable. A broken config must not take
-// the listing down, so parse failures return an error and keep the previous
-// snapshot in place.
+// loadConfig installs a configuration snapshot. Ordering is config only: no
+// `order` key means no grouping, and the listing falls back to CPA's own order
+// rather than to a rule baked into the plugin. A broken config must not take the
+// listing down, so parse failures return an error and keep the previous snapshot
+// in place.
 func loadConfig(yamlBytes []byte) error {
 	next := &activeConfig{
 		strategy: StrategyGrouped,
-		order:    append([]string(nil), defaultOrder...),
 	}
 	if len(yamlBytes) > 0 {
 		var parsed rawConfig

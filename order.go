@@ -14,9 +14,12 @@ const (
 	StrategyName = "name"
 )
 
-// defaultOrder is used when the config leaves `order` out. The rule is aggregate
-// presets first, then the GPT/Codex families, then everything else alphabetically
-// by model ID.
+// suggestedOrder is a starting template the panel can drop into the editor when
+// asked for. It is never applied at runtime: an empty `order` in config means no
+// grouping, so the only source of truth for what a client sees is config.yaml.
+//
+// The rule it models is aggregate presets first, then the GPT/Codex families,
+// then everything else alphabetically by model ID.
 //
 // Each pattern is its own bucket, so the tiers come out in the order written
 // here rather than alphabetically. Both spellings are listed because CPA applies
@@ -27,7 +30,7 @@ const (
 // The suffix forms stay deliberately strict. "*-auto" matches qoder-auto but
 // leaves codex-auto-review for the tail, which is the wanted behaviour because
 // that entry is a review model, not a routing preset.
-var defaultOrder = []string{
+var suggestedOrder = []string{
 	"auto", "auto-*", "*-auto",
 	"default", "default-*", "*-default",
 	"balanced", "balanced-*", "*-balanced",

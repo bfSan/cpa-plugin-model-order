@@ -40,7 +40,10 @@ plugins:
       priority: -100
 ```
 
-Restart CPA afterwards. With no `order` configured the built-in rule applies.
+Restart CPA afterwards.
+
+`order` is the only source of truth. There is no built-in rule: leave `order` out and
+the plugin imposes no grouping, so the listing is simply alphabetical by model ID.
 
 ## Configuration
 
@@ -74,6 +77,16 @@ from inside the CPA panel, accepts `?key=`, and otherwise asks for it. The panel
 HTML itself is served unauthenticated and carries no secrets; every read and write
 it performs goes through CPA's authenticated management API.
 
+To check the page actually runs rather than just serving bytes:
+
+```bash
+./scripts/panel-smoke.sh [panel-url]
+```
+
+It loads the panel in a headless browser and asserts the script executed. Go tests
+render the HTML but never run it, which is how a double quoted `MANAGEMENT_BASE_PATH`
+once shipped as a syntax error and left the panel blank.
+
 ### Hand writing the YAML
 
 The panel edits the same keys documented here, so either route works.
@@ -94,7 +107,7 @@ model-order:
 | Key | Default | Meaning |
 |---|---|---|
 | `strategy` | `grouped` | `grouped` puts configured buckets first; `name` sorts the whole list by model ID. |
-| `order` | built in | Ordered glob patterns matched against the model ID. Models matching nothing tail the list alphabetically. |
+| `order` | none | Ordered glob patterns matched against the model ID. Unset means no grouping. Models matching nothing tail the list alphabetically. |
 | `case_sensitive` | `false` | Match and compare model IDs case sensitively. |
 
 Within one bucket, and in the unmatched tail, entries sort alphabetically by model ID.
@@ -118,10 +131,11 @@ Rules are not limited to globs. A bare model ID is a valid pattern and pins that
 model, which is how you handle the Anthropic port's cloaked IDs: pick the cloaked ID
 out of the panel's model list and pin it, instead of guessing what it encodes.
 
-### Built-in order
+### The recommended template
 
-Aggregate presets, in tier order, then the GPT and Codex families, then everything
-else alphabetically:
+`TestUnconfiguredOrderGroupsNothing` guards the contract: nothing here is applied
+automatically. The panel's **载入推荐模板** button copies this list into the editor,
+and it stays there until you save, at which point it becomes ordinary config:
 
 ```text
 auto / auto-* / *-auto
@@ -136,6 +150,27 @@ ultimate / *-ultimate
 gpt-*
 codex-*
 ```
+
+It deliberately lists both spellings of every preset (bare `auto` and `*-auto`)
+because it is meant to drop into any deployment. A real deployment usually only
+needs the half that matches its own aliasing: on a provider prefixed host the bare
+forms match nothing, and the live rule for this project is instead
+
+```yaml
+order:
+  - "*-auto"        # qoder-auto
+  - "*-balanced"    # workbuddy-balanced
+  - "*-fast"        # workbuddy-fast
+  - "*-deep"        # workbuddy-deep
+  - "*-efficient"   # qoder-efficient
+  - "*-performance" # qoder-performance
+  - "*-ultimate"    # qoder-ultimate
+  - "gpt-*"
+  - "codex-*"
+```
+
+The panel shows a hit count per rule, which is the quickest way to find the dead
+patterns in your own list.
 
 ### What the panel does not edit
 
@@ -169,7 +204,7 @@ emptied or corrupted by an ordering bug.
 * An array whose entries carry no `id` or `name`, a document with no recognisable
   array, or a single entry list all result in a no-op.
 * A rejected configuration keeps the previously active order in place rather than
-  falling back to defaults mid-flight.
+  falling back to an unconfigured state mid-flight.
 
 ## Coverage
 

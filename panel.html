@@ -150,9 +150,9 @@ ul.models li:hover .flag,li.pick .flag{opacity:1}
     <button data-v="name" title="整份列表按模型 ID 字母序">纯字母序</button>
   </div>
   <label class="chk"><input type="checkbox" id="cs">区分大小写</label>
-  <span class="chip" id="src">内置默认</span>
+  <span class="chip" id="src">未配置</span>
   <span class="spacer"></span>
-  <button id="btnDefault">载入内置规则</button>
+  <button id="btnDefault">载入推荐模板</button>
   <button id="btnGen">按预览生成精确规则</button>
   <button class="primary" id="btnSave">保存并生效</button>
 </header>
@@ -207,7 +207,9 @@ ul.models li:hover .flag,li.pick .flag{opacity:1}
 </footer>
 
 <script>
-const MANAGEMENT_BASE_PATH = "__MO_MANAGEMENT_BASE_PATH_JSON__";
+// The host injects a quoted JS literal here, so the placeholder must not sit
+// inside its own quotes.
+const MANAGEMENT_BASE_PATH = __MO_MANAGEMENT_BASE_PATH_JSON__;
 const API = MANAGEMENT_BASE_PATH + "/plugins/model-order";
 const PLUGIN_CONFIG_PATH = MANAGEMENT_BASE_PATH + "/plugins/model-order/config";
 
@@ -287,7 +289,7 @@ function toast(kind, msg){
 }
 
 /* ---- 状态 ---- */
-let state = { strategy: "grouped", caseSensitive: false, order: [], fromConfig: false, defaultOrder: [], catalogs: [] };
+let state = { strategy: "grouped", caseSensitive: false, order: [], configured: false, suggestedOrder: [], catalogs: [] };
 let port = "";
 let dirty = false;
 let previewIds = [];
@@ -302,10 +304,10 @@ function markDirty(){
   $("src").textContent = "有未保存的修改";
   $("src").className = "chip none";
 }
-function markClean(fromConfig){
+function markClean(configured){
   dirty = false;
-  $("src").textContent = fromConfig ? "来自配置" : "内置默认";
-  $("src").className = "chip" + (fromConfig ? " hit" : "");
+  $("src").textContent = configured ? "来自配置" : "未配置(不分组)";
+  $("src").className = "chip" + (configured ? " hit" : " none");
 }
 
 async function load(){
@@ -313,15 +315,15 @@ async function load(){
   state.strategy = d.strategy || "grouped";
   state.caseSensitive = !!d.case_sensitive;
   state.order = Array.isArray(d.order) ? d.order.slice() : [];
-  state.fromConfig = !!d.from_config;
-  state.defaultOrder = Array.isArray(d.default_order) ? d.default_order.slice() : [];
+  state.configured = !!d.configured;
+  state.suggestedOrder = Array.isArray(d.suggested_order) ? d.suggested_order.slice() : [];
   state.catalogs = Array.isArray(d.catalogs) ? d.catalogs : [];
   $("ver").textContent = "v" + (d.version || "?");
   if (!port || !state.catalogs.some(c => c.port === port)) {
     port = state.catalogs.length ? state.catalogs[0].port : "";
   }
   renderAll();
-  markClean(state.fromConfig);
+  markClean(state.configured);
 }
 
 function renderAll(){
@@ -348,7 +350,7 @@ function currentCatalog(){ return state.catalogs.find(c => c.port === port) || {
 function renderRules(){
   const box = $("rules");
   if (!state.order.length) {
-    box.innerHTML = `<li class="empty">没有规则。当前等价于纯字母序,或点“载入内置规则”。</li>`;
+    box.innerHTML = `<li class="empty">没有规则,所以当前不分组,整份列表按模型 ID 字母序。要分组就加规则,或点“载入推荐模板”。</li>`;
     return;
   }
   const ids = currentCatalog().entries.map(e => e.id);
@@ -523,7 +525,7 @@ $("pvDown").addEventListener("click", () => move(1));
 $("pvHome").addEventListener("click", () => move("home"));
 
 $("btnDefault").addEventListener("click", () => {
-  state.order = state.defaultOrder.slice(); manualOrder = []; markDirty(); renderAll(); toast("ok", "已载入内置规则,保存后生效");
+  state.order = state.suggestedOrder.slice(); manualOrder = []; markDirty(); renderAll(); toast("ok", "已填入推荐模板,保存后生效");
 });
 $("btnGen").addEventListener("click", () => {
   if (!previewIds.length) { toast("err", "预览为空,先生成预览"); return; }
@@ -533,11 +535,11 @@ $("btnGen").addEventListener("click", () => {
 $("btnSave").addEventListener("click", async () => {
   const body = { strategy: state.strategy, case_sensitive: state.caseSensitive };
   body.order = state.order.filter(p => p && p.trim()).map(p => p.trim());
-  if (!body.order.length) body.order = null; // null 让 CPA 删除该键,回到插件内置默认
+  if (!body.order.length) body.order = null; // null 让 CPA 删除该键,即不分组
   try {
     await call(PLUGIN_CONFIG_PATH, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    state.fromConfig = !!body.order;
-    markClean(state.fromConfig);
+    state.configured = !!body.order;
+    markClean(state.configured);
     toast("ok", "已写入 config.yaml 并热更新");
   } catch (e) { toast("err", "保存失败: " + e.message); }
 });

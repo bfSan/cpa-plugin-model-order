@@ -110,9 +110,7 @@ func TestIsModelListing(t *testing.T) {
 }
 
 func TestOrderBodyMatchesAgreedRule(t *testing.T) {
-	if err := loadConfig(nil); err != nil {
-		t.Fatalf("defaults must load cleanly: %v", err)
-	}
+	loadSuggested(t)
 	out, changed := orderBody(portOpenAI, listingBody(serverOrder))
 	if !changed {
 		t.Fatal("expected the listing to be reordered")
@@ -127,9 +125,7 @@ func TestOrderBodyMatchesAgreedRule(t *testing.T) {
 }
 
 func TestOrderBodyIsIdempotent(t *testing.T) {
-	if err := loadConfig(nil); err != nil {
-		t.Fatalf("defaults must load cleanly: %v", err)
-	}
+	loadSuggested(t)
 	once, changed := orderBody(portOpenAI, listingBody(serverOrder))
 	if !changed {
 		t.Fatal("expected first pass to reorder")
@@ -142,9 +138,7 @@ func TestOrderBodyIsIdempotent(t *testing.T) {
 }
 
 func TestOrderBodyKeepsMembershipIntact(t *testing.T) {
-	if err := loadConfig(nil); err != nil {
-		t.Fatalf("defaults must load cleanly: %v", err)
-	}
+	loadSuggested(t)
 	out, _ := orderBody(portOpenAI, listingBody(serverOrder))
 	got := listedIDs(t, out)
 	sort.Strings(got)
@@ -195,9 +189,7 @@ func TestOrderBodyLeavesNonListingsAlone(t *testing.T) {
 }
 
 func TestLoadConfigRejectsUnknownStrategyAndKeepsPrevious(t *testing.T) {
-	if err := loadConfig(nil); err != nil {
-		t.Fatalf("defaults must load cleanly: %v", err)
-	}
+	loadSuggested(t)
 	before := currentConfig()
 	if err := loadConfig([]byte("strategy: sideways\n")); err == nil {
 		t.Fatal("expected unknown strategy to be rejected")
@@ -210,9 +202,7 @@ func TestLoadConfigRejectsUnknownStrategyAndKeepsPrevious(t *testing.T) {
 // TestGeminiListingReordered covers the /v1beta/models shape, which keys the
 // array as "models" and identifies entries with "name".
 func TestGeminiListingReordered(t *testing.T) {
-	if err := loadConfig(nil); err != nil {
-		t.Fatalf("defaults must load cleanly: %v", err)
-	}
+	loadSuggested(t)
 	body := []byte(`{"models":[{"name":"models/zeta","version":"v1"},{"name":"models/alpha","version":"v1"}]}`)
 	out, changed := orderBody(portGemini, body)
 	if !changed {
