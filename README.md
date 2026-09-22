@@ -44,6 +44,40 @@ Restart CPA afterwards. With no `order` configured the built-in rule applies.
 
 ## Configuration
 
+### Through the panel (recommended)
+
+The plugin ships its own configuration page, registered as a CPA management
+resource, so it appears in CPA's control panel menu as **Model Order**. Open:
+
+```text
+http://<cpa-host>:<port>/v0/resource/plugins/model-order/panel
+```
+
+It is a single page with three panes:
+
+* **Rules** — the `order` list, editable in place: add, edit, delete, move up and
+  down. Each rule shows how many of the currently served models it actually hits,
+  so a typo that matches nothing is obvious.
+* **Models CPA actually served** — the real IDs, per port, captured from the
+  listings CPA returned. Pick one and press `exact` to pin it or `prefix` to
+  group a provider family, without writing any glob syntax.
+* **Preview** — the resulting order, computed by the plugin's own comparator so it
+  cannot drift from runtime behaviour. Rows can be moved up and down by hand, then
+  turned into an exact rule list with one click.
+
+Saving writes `strategy`, `order` and `case_sensitive` through CPA's own
+`PATCH /v0/management/plugins/model-order/config`, which persists them into
+`config.yaml` and hot reloads the plugin. No restart, no hand editing.
+
+The page needs the CPA management key. It picks it up automatically when opened
+from inside the CPA panel, accepts `?key=`, and otherwise asks for it. The panel
+HTML itself is served unauthenticated and carries no secrets; every read and write
+it performs goes through CPA's authenticated management API.
+
+### Hand writing the YAML
+
+The panel edits the same keys documented here, so either route works.
+
 ```yaml
 model-order:
   enabled: true
@@ -79,6 +113,10 @@ Within one bucket, and in the unmatched tail, entries sort alphabetically by mod
 Because CPA applies aliases before the list reaches this plugin, both spellings of a
 preset are worth listing when you write your own `order`: a deployment that prefixes
 every alias per provider serves `qoder-auto`, an unprefixed one serves `auto`.
+
+Rules are not limited to globs. A bare model ID is a valid pattern and pins that one
+model, which is how you handle the Anthropic port's cloaked IDs: pick the cloaked ID
+out of the panel's model list and pin it, instead of guessing what it encodes.
 
 ### Built-in order
 

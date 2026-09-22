@@ -113,7 +113,7 @@ func TestOrderBodyMatchesAgreedRule(t *testing.T) {
 	if err := loadConfig(nil); err != nil {
 		t.Fatalf("defaults must load cleanly: %v", err)
 	}
-	out, changed := orderBody(listingBody(serverOrder))
+	out, changed := orderBody(portOpenAI, listingBody(serverOrder))
 	if !changed {
 		t.Fatal("expected the listing to be reordered")
 	}
@@ -130,13 +130,13 @@ func TestOrderBodyIsIdempotent(t *testing.T) {
 	if err := loadConfig(nil); err != nil {
 		t.Fatalf("defaults must load cleanly: %v", err)
 	}
-	once, changed := orderBody(listingBody(serverOrder))
+	once, changed := orderBody(portOpenAI, listingBody(serverOrder))
 	if !changed {
 		t.Fatal("expected first pass to reorder")
 	}
 	// CPA may serve the cached snapshot repeatedly; a second pass must report
 	// "nothing to do" so the body is never rewritten twice.
-	if _, changedAgain := orderBody(once); changedAgain {
+	if _, changedAgain := orderBody(portOpenAI, once); changedAgain {
 		t.Fatal("second pass must be a no-op on an already ordered list")
 	}
 }
@@ -145,7 +145,7 @@ func TestOrderBodyKeepsMembershipIntact(t *testing.T) {
 	if err := loadConfig(nil); err != nil {
 		t.Fatalf("defaults must load cleanly: %v", err)
 	}
-	out, _ := orderBody(listingBody(serverOrder))
+	out, _ := orderBody(portOpenAI, listingBody(serverOrder))
 	got := listedIDs(t, out)
 	sort.Strings(got)
 	want := append([]string(nil), serverOrder...)
@@ -160,7 +160,7 @@ func TestOrderBodyHonoursConfiguredOrder(t *testing.T) {
 	if err := loadConfig([]byte("strategy: grouped\norder:\n  - \"qoder-*\"\n  - \"gpt-*\"\n")); err != nil {
 		t.Fatalf("config load failed: %v", err)
 	}
-	out, changed := orderBody(listingBody([]string{"workbuddy-hy3", "gpt-5.5", "qoder-auto"}))
+	out, changed := orderBody(portOpenAI, listingBody([]string{"workbuddy-hy3", "gpt-5.5", "qoder-auto"}))
 	if !changed {
 		t.Fatal("expected reorder")
 	}
@@ -176,7 +176,7 @@ func TestOrderBodyNameStrategy(t *testing.T) {
 	if err := loadConfig([]byte("strategy: name\n")); err != nil {
 		t.Fatalf("config load failed: %v", err)
 	}
-	out, changed := orderBody(listingBody([]string{"workbuddy-hy3", "gpt-5.5", "qoder-auto"}))
+	out, changed := orderBody(portOpenAI, listingBody([]string{"workbuddy-hy3", "gpt-5.5", "qoder-auto"}))
 	if !changed {
 		t.Fatal("expected reorder")
 	}
@@ -189,7 +189,7 @@ func TestOrderBodyNameStrategy(t *testing.T) {
 
 func TestOrderBodyLeavesNonListingsAlone(t *testing.T) {
 	body := []byte(`{"id":"c1","object":"chat.completion","choices":[{"message":{"content":"hi"}}]}`)
-	if out, changed := orderBody(body); changed {
+	if out, changed := orderBody(portOpenAI, body); changed {
 		t.Fatalf("chat completion must not be rewritten, got %s", out)
 	}
 }
@@ -214,7 +214,7 @@ func TestGeminiListingReordered(t *testing.T) {
 		t.Fatalf("defaults must load cleanly: %v", err)
 	}
 	body := []byte(`{"models":[{"name":"models/zeta","version":"v1"},{"name":"models/alpha","version":"v1"}]}`)
-	out, changed := orderBody(body)
+	out, changed := orderBody(portGemini, body)
 	if !changed {
 		t.Fatal("expected gemini listing to be reordered")
 	}

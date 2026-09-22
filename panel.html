@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型排序</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --ink:#1c2126; --muted:#6b7480;
+  --accent:#2f6feb; --ok:#1a7f4b; --warn:#9a6700; --bad:#b42318; --chip:#eef1f5;
+}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#16181c; --panel:#1e2126; --line:#2e3238; --ink:#e7eaee; --muted:#98a1ac;
+    --accent:#6aa0ff; --chip:#272b31; --ok:#4cc38a; --warn:#d6a728; --bad:#f5645c;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);
+  padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+header h1{font-size:14px;margin:0;font-weight:600;letter-spacing:.01em}
+.ver{color:var(--muted);font-size:11px}
+.spacer{flex:1 1 auto}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;padding:14px 16px;max-width:1500px;margin:0 auto}
+@media (max-width:980px){main{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+.card>h2{margin:0;padding:9px 12px;font-size:12px;font-weight:600;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:8px;background:linear-gradient(180deg,rgba(0,0,0,.012),transparent)}
+.card>h2 .hint{font-weight:400;color:var(--muted);font-size:11px}
+.bar{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.body{padding:8px 12px;overflow:auto;max-height:60vh}
+button{font:inherit;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;
+  padding:4px 9px;cursor:pointer}
+button:hover{border-color:#b9c2cd}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover{filter:brightness(1.06)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.mini{padding:1px 6px;font-size:11px;line-height:1.5}
+input[type=text],input[type=search],select{font:inherit;background:var(--panel);color:var(--ink);
+  border:1px solid var(--line);border-radius:6px;padding:4px 7px;min-width:0}
+input.grow{flex:1 1 160px}
+label.chk{display:flex;align-items:center;gap:5px;color:var(--muted);user-select:none}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:4px 10px;background:var(--panel)}
+.seg button.on{background:var(--accent);color:#fff}
+.chip{display:inline-block;background:var(--chip);border-radius:4px;padding:0 6px;font-size:11px;color:var(--muted)}
+.chip.hit{color:var(--ok)}
+.chip.none{color:var(--warn)}
+.row{display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(128,128,128,.12)}
+.row:last-child{border-bottom:0}
+.idx{width:22px;text-align:right;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.name{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
+.empty{color:var(--muted);padding:14px 2px;font-size:12px}
+ol.rules{margin:0;padding:0;list-style:none;counter-reset:r}
+ul.models{margin:0;padding:0;list-style:none}
+ul.models li{display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid rgba(128,128,128,.12)}
+ul.models li:last-child{border-bottom:0}
+ul.models li.pick{background:rgba(47,111,235,.07)}
+.flag{margin-left:auto;display:flex;gap:4px;opacity:0;transition:opacity .1s}
+ul.models li:hover .flag,li.pick .flag{opacity:1}
+#auth{padding:10px 16px;background:#fff7e6;border-bottom:1px solid var(--line);display:none;gap:8px;align-items:center}
+@media (prefers-color-scheme: dark){#auth{background:#332700}}
+#toasts{position:fixed;right:14px;bottom:14px;display:flex;flex-direction:column;gap:8px;z-index:20}
+.toast{background:var(--ink);color:var(--bg);padding:8px 12px;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.18);
+  max-width:340px;font-size:12px}
+.toast.err{background:var(--bad);color:#fff}
+.toast.ok{background:var(--ok);color:#fff}
+.note{color:var(--muted);font-size:11px;padding:6px 12px;border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <h1>模型排序</h1><span class="ver" id="ver"></span>
+  <div class="seg" id="strategy">
+    <button data-v="grouped" title="聚合预设在前,其余按规则分组">分组</button>
+    <button data-v="name" title="整份列表按模型 ID 字母序">纯字母序</button>
+  </div>
+  <label class="chk"><input type="checkbox" id="cs">区分大小写</label>
+  <span class="chip" id="src">内置默认</span>
+  <span class="spacer"></span>
+  <button id="btnDefault">载入内置规则</button>
+  <button id="btnGen">按预览生成精确规则</button>
+  <button class="primary" id="btnSave">保存并生效</button>
+</header>
+
+<div id="auth">
+  <span>需要 CPA 管理密钥</span>
+  <input type="password" class="grow" id="keyInput" placeholder="remote-management.secret-key" autocomplete="off">
+  <button onclick="saveKey()">确定</button>
+  <button class="mini" onclick="suppressKey()">本次不用</button>
+</div>
+
+<main>
+  <section class="card">
+    <h2>排序规则 order <span class="hint">从上到下匹配,先命中先入组;留空即不分组,全部字母序</span></h2>
+    <div class="bar">
+      <input type="text" class="grow" id="newPattern" placeholder="模型 ID 或通配,如 gpt-* / *-auto / *kimi*">
+      <button id="btnAdd">添加</button>
+      <button class="mini" id="btnTop" title="添加到最前面">置顶</button>
+    </div>
+    <div class="body"><ol class="rules" id="rules"></ol></div>
+    <div class="note">每条规则各成一桶,桶内按模型 ID 字母序。未命中任何规则的模型排在最后,同样按字母序。</div>
+  </section>
+
+  <section class="card">
+    <h2>CPA 实际下发的模型 <span class="hint" id="capHint"></span></h2>
+    <div class="bar">
+      <select id="port"></select>
+      <input type="search" class="grow" id="filter" placeholder="筛选模型 ID">
+      <span class="chip" id="cnt"></span>
+    </div>
+    <div class="body"><ul class="models" id="models"></ul></div>
+    <div class="note">这里列出的是各端口真实收到的 ID。Anthropic 端口是伪装名,想单独控制它就直接点右侧的“精确”,把伪装 ID 写成规则。</div>
+  </section>
+
+  <section class="card" style="grid-column:1/-1">
+    <h2>预览 <span class="hint">用未保存的规则实时计算,排序与插件运行时同一套代码</span>
+      <span class="spacer"></span><span class="chip" id="pvPort"></span></h2>
+    <div class="bar">
+      <button class="mini" id="pvUp" title="上移选中项">↑</button>
+      <button class="mini" id="pvDown" title="下移选中项">↓</button>
+      <button class="mini" id="pvHome" title="移到最前">移顶</button>
+      <span class="hint">选中一行后可手工微调,再点顶部“按预览生成精确规则”</span>
+    </div>
+    <div class="body"><ul class="models" id="preview"></ul></div>
+  </section>
+</main>
+
+<div id="toasts"></div>
+
+<script>
+const MANAGEMENT_BASE_PATH = "__MO_MANAGEMENT_BASE_PATH_JSON__";
+const API = MANAGEMENT_BASE_PATH + "/plugins/model-order";
+const PLUGIN_CONFIG_PATH = MANAGEMENT_BASE_PATH + "/plugins/model-order/config";
+
+/* ---- 管理密钥: URL ?key= > sessionStorage > CPA 主面板 localStorage ---- */
+const ENC_PREFIX = "enc::v1::";
+const SECRET_SALT = "cli-proxy-api-webui::secure-storage";
+const PANEL_STORE = "cli-proxy-auth";
+const SS_KEY = "model-order-mgmt-key";
+let keySuppressed = false;
+
+const readSessionKey = () => keySuppressed ? null : (() => { try { return sessionStorage.getItem(SS_KEY); } catch (_) { return null; } })();
+const storeSessionKey = k => { try { sessionStorage.setItem(SS_KEY, k); keySuppressed = false; return true; } catch (_) { return false; } };
+function deobfuscate(p){
+  if(!p || !p.startsWith(ENC_PREFIX)) return p;
+  try{
+    const bytes = new TextEncoder().encode(SECRET_SALT + "|" + location.host + "|" + navigator.userAgent);
+    const bin = atob(p.slice(ENC_PREFIX.length));
+    const out = new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) out[i] = bin.charCodeAt(i) ^ bytes[i % bytes.length];
+    return new TextDecoder().decode(out);
+  }catch(_){ return p; }
+}
+function readPanelKey(){
+  try { if (window.self === window.top) return null; } catch (_) { return null; }
+  let raw; try { raw = localStorage.getItem(PANEL_STORE); } catch (_) { return null; }
+  if (!raw) return null;
+  try{
+    const parsed = JSON.parse(deobfuscate(raw));
+    const st = (parsed && parsed.state) || parsed || {};
+    return typeof st.managementKey === "string" && st.managementKey ? st.managementKey : null;
+  }catch(_){ return null; }
+}
+(function captureUrlKey(){
+  const url = new URL(location.href);
+  const k = url.searchParams.get("key");
+  if (!k) return;
+  storeSessionKey(k);
+  url.searchParams.delete("key");
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
+})();
+const getKey = () => readSessionKey() || readPanelKey();
+function saveKey(){
+  const v = document.getElementById("keyInput").value.trim();
+  if (!v) return;
+  if (!storeSessionKey(v)) { showAuth(); return; }
+  document.getElementById("auth").style.display = "none";
+  boot();
+}
+function suppressKey(){ keySuppressed = true; try { sessionStorage.removeItem(SS_KEY); } catch (_) {} document.getElementById("auth").style.display = "none"; }
+function showAuth(){ const el = document.getElementById("auth"); el.style.display = "flex"; const i = document.getElementById("keyInput"); if (i) i.focus(); }
+const authHeaders = k => k ? { "Authorization": "Bearer " + k } : {};
+
+async function call(path, opts = {}){
+  const k = getKey();
+  if (!k) { showAuth(); throw new Error("需要管理密钥"); }
+  const r = await fetch(path, { ...opts, credentials: "omit", headers: { ...(opts.headers || {}), ...authHeaders(k) } });
+  if (r.status === 401 || r.status === 403) { showAuth(); throw new Error("管理密钥无效"); }
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { throw new Error("响应不是 JSON: " + text.slice(0, 120)); }
+  if (!r.ok) throw new Error((data && (data.message || data.error)) || ("HTTP " + r.status));
+  return data;
+}
+
+function toast(kind, msg){
+  const box = document.getElementById("toasts");
+  const el = document.createElement("div");
+  el.className = "toast" + (kind === "err" ? " err" : kind === "ok" ? " ok" : "");
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => el.remove(), kind === "err" ? 6000 : 3200);
+}
+
+/* ---- 状态 ---- */
+let state = { strategy: "grouped", caseSensitive: false, order: [], fromConfig: false, defaultOrder: [], catalogs: [] };
+let port = "";
+let dirty = false;
+let previewIds = [];
+let previewSel = -1;
+let previewTimer = 0;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function markDirty(){
+  dirty = true;
+  $("src").textContent = "有未保存的修改";
+  $("src").className = "chip none";
+}
+function markClean(fromConfig){
+  dirty = false;
+  $("src").textContent = fromConfig ? "来自配置" : "内置默认";
+  $("src").className = "chip" + (fromConfig ? " hit" : "");
+}
+
+async function load(){
+  const d = await call(API + "/status");
+  state.strategy = d.strategy || "grouped";
+  state.caseSensitive = !!d.case_sensitive;
+  state.order = Array.isArray(d.order) ? d.order.slice() : [];
+  state.fromConfig = !!d.from_config;
+  state.defaultOrder = Array.isArray(d.default_order) ? d.default_order.slice() : [];
+  state.catalogs = Array.isArray(d.catalogs) ? d.catalogs : [];
+  $("ver").textContent = "v" + (d.version || "?");
+  if (!port || !state.catalogs.some(c => c.port === port)) {
+    port = state.catalogs.length ? state.catalogs[0].port : "";
+  }
+  renderAll();
+  markClean(state.fromConfig);
+}
+
+function renderAll(){
+  // 策略分段
+  document.querySelectorAll("#strategy button").forEach(b => b.classList.toggle("on", b.dataset.v === state.strategy));
+  $("cs").checked = state.caseSensitive;
+  renderPorts();
+  renderRules();
+  renderModels();
+  schedulePreview(0);
+}
+
+function renderPorts(){
+  const sel = $("port");
+  sel.innerHTML = state.catalogs.map(c => `<option value="${esc(c.port)}">${esc(c.port)} (${c.count})</option>`).join("");
+  if (port) sel.value = port;
+  const cap = state.catalogs.find(c => c.port === port);
+  $("capHint").textContent = cap ? `捕获于 ${new Date(cap.seen_at).toLocaleTimeString()}` : "尚无捕获";
+  $("pvPort").textContent = port ? "端口 " + port : "无数据";
+}
+
+function currentCatalog(){ return state.catalogs.find(c => c.port === port) || { entries: [] }; }
+
+function renderRules(){
+  const box = $("rules");
+  if (!state.order.length) {
+    box.innerHTML = `<li class="empty">没有规则。当前等价于纯字母序,或点“载入内置规则”。</li>`;
+    return;
+  }
+  const ids = currentCatalog().entries.map(e => e.id);
+  box.innerHTML = state.order.map((p, i) => {
+    const hits = ids.filter(id => testPattern(p, id, state.caseSensitive)).length;
+    return `<li class="row">
+      <span class="idx">${i + 1}</span>
+      <input type="text" class="grow" value="${esc(p)}" data-i="${i}">
+      <span class="chip ${hits ? "hit" : "none"}" title="命中当前端口模型数">${hits}</span>
+      <button class="mini" data-act="up" data-i="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
+      <button class="mini" data-act="down" data-i="${i}" ${i === state.order.length - 1 ? "disabled" : ""}>↓</button>
+      <button class="mini" data-act="del" data-i="${i}">删</button>
+    </li>`;
+  }).join("");
+}
+
+function renderModels(){
+  const q = $("filter").value.trim().toLowerCase();
+  const entries = currentCatalog().entries.filter(e => !q || e.id.toLowerCase().includes(q));
+  $("cnt").textContent = entries.length + " / " + (currentCatalog().count || 0);
+  const box = $("models");
+  if (!entries.length) {
+    box.innerHTML = `<li class="empty">先用任一客户端拉一次模型列表,插件会在此处记下 CPA 真实下发的 ID。</li>`;
+    return;
+  }
+  box.innerHTML = entries.map(e => {
+    const hit = firstRule(e.id);
+    return `<li data-id="${esc(e.id)}">
+      <span class="name">${esc(e.id)}</span>
+      ${e.owned_by ? `<span class="chip">${esc(e.owned_by)}</span>` : ""}
+      <span class="chip ${hit ? "hit" : "none"}">${hit ? esc(hit) : "未分组"}</span>
+      <span class="flag">
+        <button class="mini" data-act="exact" data-id="${esc(e.id)}" title="按这个 ID 建精确规则">精确</button>
+        <button class="mini" data-act="prefix" data-id="${esc(e.id)}" title="取 provider 前缀建通配规则">前缀</button>
+      </span>
+    </li>`;
+  }).join("");
+}
+
+/* ---- 与插件同款匹配语义: 前缀 / 后缀 / 包含 / 通用 glob / 精确 ---- */
+function toReg(pattern){
+  const parts = pattern.split("*");
+  const lit = parts.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp("^" + lit.join("[\\s\\S]*") + "$");
+}
+function testPattern(pattern, id, caseSensitive){
+  if (pattern === "*") return false;
+  let p = pattern, s = id;
+  if (!caseSensitive) { p = p.toLowerCase(); s = s.toLowerCase(); }
+  return toReg(p).test(s);
+}
+function firstRule(id){
+  for (const p of state.order) if (testPattern(p, id, state.caseSensitive)) return p;
+  return "";
+}
+function sortIds(ids, strategy, order, caseSensitive){
+  const rules = order.filter(p => p && p.trim() && p.trim() !== "*")
+    .map(p => ({ p: caseSensitive ? p : p.toLowerCase(), re: toReg(caseSensitive ? p : p.toLowerCase()) }));
+  const rank = id => {
+    const s = caseSensitive ? id : id.toLowerCase();
+    for (let i = 0; i < rules.length; i++) if (rules[i].re.test(s)) return i;
+    return rules.length;
+  };
+  const cmp = (a, b) => {
+    if (strategy !== "name" && rules.length) {
+      const ra = rank(a), rb = rank(b);
+      if (ra !== rb) return ra - rb;
+    }
+    const la = a.toLowerCase(), lb = b.toLowerCase();
+    if (la !== lb) return la < lb ? -1 : 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  };
+  return ids.slice().sort(cmp);
+}
+
+/* ---- 预览 ---- */
+function schedulePreview(ms){
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(renderPreview, ms === undefined ? 220 : ms);
+}
+async function renderPreview(){
+  const cap = currentCatalog();
+  const box = $("preview");
+  if (!cap.entries.length) { box.innerHTML = `<li class="empty">无模型数据</li>`; return; }
+  let ordered;
+  try {
+    const d = await call(API + "/preview", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy: state.strategy, order: state.order, case_sensitive: state.caseSensitive, port })
+    });
+    ordered = d.ordered || [];
+  } catch (e) {
+    // 后端不可用时退回本地等价实现,保证编辑过程看得见结果
+    ordered = sortIds(cap.entries.map(e => e.id), state.strategy, state.order, state.caseSensitive);
+    if (getKey()) toast("err", "预览接口失败,已用本地计算: " + e.message);
+  }
+  previewIds = manualOrder.length ? manualOrder.filter(id => ordered.includes(id)) : ordered;
+  drawPreview();
+}
+let manualOrder = [];
+function drawPreview(){
+  const byId = {};
+  currentCatalog().entries.forEach(e => { byId[e.id] = e; });
+  $("preview").innerHTML = previewIds.map((id, i) => {
+    const e = byId[id] || {};
+    return `<li class="${i === previewSel ? "pick" : ""}" data-i="${i}">
+      <span class="idx">${i + 1}</span><span class="name">${esc(id)}</span>
+      ${e.owned_by ? `<span class="chip">${esc(e.owned_by)}</span>` : ""}
+    </li>`;
+  }).join("");
+}
+function move(delta){
+  if (previewSel < 0) return;
+  const to = delta === "home" ? 0 : previewSel + delta;
+  if (to < 0 || to >= previewIds.length) return;
+  const id = previewIds.splice(previewSel, 1)[0];
+  previewIds.splice(to, 0, id);
+  previewSel = to;
+  manualOrder = previewIds.slice();
+  drawPreview();
+}
+
+/* ---- 事件 ---- */
+$("strategy").addEventListener("click", ev => {
+  const b = ev.target.closest("button"); if (!b) return;
+  state.strategy = b.dataset.v; markDirty(); renderAll();
+});
+$("cs").addEventListener("change", ev => { state.caseSensitive = ev.target.checked; markDirty(); renderAll(); });
+
+$("newPattern").addEventListener("keydown", ev => { if (ev.key === "Enter") $("btnAdd").click(); });
+$("btnAdd").addEventListener("click", () => {
+  const v = $("newPattern").value.trim(); if (!v) return;
+  state.order.push(v); $("newPattern").value = ""; markDirty(); renderRules(); schedulePreview(0);
+});
+$("btnTop").addEventListener("click", () => {
+  const v = $("newPattern").value.trim(); if (!v) return;
+  state.order.unshift(v); $("newPattern").value = ""; markDirty(); renderRules(); schedulePreview(0);
+});
+
+$("rules").addEventListener("input", ev => {
+  const i = ev.target.dataset && ev.target.dataset.i;
+  if (i === undefined || ev.target.tagName !== "INPUT") return;
+  state.order[+i] = ev.target.value; markDirty(); schedulePreview(350);
+});
+$("rules").addEventListener("click", ev => {
+  const b = ev.target.closest("button"); if (!b) return;
+  const i = +b.dataset.i, act = b.dataset.act;
+  if (act === "del") state.order.splice(i, 1);
+  if (act === "up" && i > 0) { [state.order[i - 1], state.order[i]] = [state.order[i], state.order[i - 1]]; }
+  if (act === "down" && i < state.order.length - 1) { [state.order[i + 1], state.order[i]] = [state.order[i], state.order[i + 1]]; }
+  markDirty(); renderRules(); renderModels(); schedulePreview(0);
+});
+
+$("models").addEventListener("click", ev => {
+  const b = ev.target.closest("button"); if (!b) return;
+  const id = b.dataset.id;
+  const rule = b.dataset.act === "exact" ? id : (id.split("-")[0] + "-*");
+  if (state.order.includes(rule)) { toast("", "规则已存在: " + rule); return; }
+  state.order.push(rule);
+  markDirty(); renderRules(); renderModels(); schedulePreview(0);
+  toast("ok", "已加规则 " + rule);
+});
+$("filter").addEventListener("input", () => renderModels());
+$("port").addEventListener("change", ev => { port = ev.target.value; manualOrder = []; previewSel = -1; renderAll(); });
+
+$("preview").addEventListener("click", ev => {
+  const li = ev.target.closest("li"); if (!li || !li.dataset.i) return;
+  previewSel = +li.dataset.i; drawPreview();
+});
+$("pvUp").addEventListener("click", () => move(-1));
+$("pvDown").addEventListener("click", () => move(1));
+$("pvHome").addEventListener("click", () => move("home"));
+
+$("btnDefault").addEventListener("click", () => {
+  state.order = state.defaultOrder.slice(); manualOrder = []; markDirty(); renderAll(); toast("ok", "已载入内置规则,保存后生效");
+});
+$("btnGen").addEventListener("click", () => {
+  if (!previewIds.length) { toast("err", "预览为空,先生成预览"); return; }
+  state.order = previewIds.slice(); manualOrder = []; markDirty(); renderAll();
+  toast("ok", `已按预览生成 ${state.order.length} 条精确规则,保存后生效`);
+});
+$("btnSave").addEventListener("click", async () => {
+  const body = { strategy: state.strategy, case_sensitive: state.caseSensitive };
+  body.order = state.order.filter(p => p && p.trim()).map(p => p.trim());
+  if (!body.order.length) body.order = null; // null 让 CPA 删除该键,回到插件内置默认
+  try {
+    await call(PLUGIN_CONFIG_PATH, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    state.fromConfig = !!body.order;
+    markClean(state.fromConfig);
+    toast("ok", "已写入 config.yaml 并热更新");
+  } catch (e) { toast("err", "保存失败: " + e.message); }
+});
+
+async function boot(){
+  try { await load(); }
+  catch (e) { toast("err", e.message); if (!getKey()) showAuth(); }
+}
+boot();
+</script>
+</body>
+</html>

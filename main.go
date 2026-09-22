@@ -89,6 +89,7 @@ type registration struct {
 // declares are sent; everything else stays false on the host side.
 type registrationCapability struct {
 	ResponseInterceptor bool `json:"response_interceptor"`
+	ManagementAPI       bool `json:"management_api"`
 }
 
 func main() {}
@@ -149,6 +150,20 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodResponseInterceptAfter:
 		return handleInterceptResponse(request)
 
+	case pluginabi.MethodManagementRegister:
+		var regReq pluginapi.ManagementRegistrationRequest
+		if err := json.Unmarshal(request, &regReq); err == nil {
+			if regReq.BasePath != "" {
+				setManagementBasePath(regReq.BasePath)
+			}
+			if regReq.ResourceBasePath != "" {
+				setResourceBasePath(regReq.ResourceBasePath)
+			}
+		}
+		return okEnvelope(managementRegistration())
+	case pluginabi.MethodManagementHandle:
+		return handleManagement(request)
+
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -179,7 +194,7 @@ func handleInterceptResponse(raw []byte) ([]byte, error) {
 	if !isModelListing(req) {
 		return okEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
-	ordered, changed := orderBody(req.Body)
+	ordered, changed := orderBody(req.SourceFormat, req.Body)
 	if !changed {
 		return okEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
@@ -215,6 +230,7 @@ func modelOrderRegistration() registration {
 		},
 		Capabilities: registrationCapability{
 			ResponseInterceptor: true,
+			ManagementAPI:       true,
 		},
 	}
 }

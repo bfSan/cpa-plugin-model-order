@@ -25,10 +25,11 @@ func isModelListing(req pluginapi.ResponseInterceptRequest) bool {
 	return len(req.Body) > 0
 }
 
-// orderBody rewrites a model listing body into the configured order.
+// orderBody rewrites a model listing body into the configured order, and records
+// what was served so the panel can show real ids rather than guesses.
 // The second result reports whether anything changed; a false means the caller
 // should return no body at all so CPA keeps its own bytes.
-func orderBody(body []byte) ([]byte, bool) {
+func orderBody(sourceFormat string, body []byte) ([]byte, bool) {
 	list, errParse := parseModelList(body)
 	if errParse != nil {
 		return nil, false
@@ -58,6 +59,9 @@ func orderBody(body []byte) ([]byte, bool) {
 			changed = true
 		}
 	}
+	entries := readCatalogEntries(reordered)
+	catalog.record(portFor(sourceFormat, entries), entries)
+
 	if !changed {
 		return nil, false
 	}

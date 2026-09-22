@@ -22,6 +22,10 @@ type activeConfig struct {
 	matchers      []matcher
 	// order echoes the effective pattern list, for the status route.
 	order []string
+	// fromConfig records whether the pattern list came from plugin config rather
+	// than the built-in defaults. The panel shows the difference so a user can
+	// tell their own rule apart from the shipped one.
+	fromConfig bool
 }
 
 var configStore atomic.Pointer[activeConfig]
@@ -51,11 +55,17 @@ func loadConfig(yamlBytes []byte) error {
 		next.caseSensitive = parsed.CaseSensitive
 		if len(parsed.Order) > 0 {
 			next.order = append([]string(nil), parsed.Order...)
+			next.fromConfig = true
 		}
 	}
 	next.matchers = compileMatchers(next.order, next.caseSensitive)
 	configStore.Store(next)
 	return nil
+}
+
+// orderConfigured reports whether the active pattern list came from config.
+func orderConfigured() bool {
+	return currentConfig().fromConfig
 }
 
 // currentConfig returns the effective snapshot, initialising defaults if the

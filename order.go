@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // Strategy values accepted in plugin config.
 const (
@@ -210,4 +213,13 @@ func compareIDs(a, b string, caseSensitive bool) int {
 		}
 	}
 	return strings.Compare(a, b)
+}
+
+// sortIDs orders model IDs in place using a comparer. It exists so the preview
+// route sorts with exactly the same code the interceptor runs, rather than
+// shipping a second implementation that could drift.
+func sortIDs(ids []string, less func(a, b string) bool) {
+	sort.SliceStable(ids, func(i, j int) bool {
+		return less(ids[i], ids[j])
+	})
 }

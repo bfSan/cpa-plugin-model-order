@@ -18,7 +18,7 @@ func TestCodexClientCatalogReordered(t *testing.T) {
 		`{"slug":"gpt-6-astra","display_name":"Astra","model_messages":{"instructions":"b"},"priority":1}` +
 		`]}`)
 
-	out, changed := orderBody(body)
+	out, changed := orderBody(portCodex, body)
 	if !changed {
 		t.Fatal("expected the codex client catalog to be reordered")
 	}
@@ -67,7 +67,7 @@ func TestCatalogNumbersKeepExactFormat(t *testing.T) {
 		`{"slug":"zeta","context_window":272000,"ratio":0.30,"exp":1e2},` +
 		`{"slug":"alpha","context_window":272000,"ratio":0.30,"exp":1e2}` +
 		`]}`)
-	out, changed := orderBody(body)
+	out, changed := orderBody(portCodex, body)
 	if !changed {
 		t.Fatal("expected reorder")
 	}
