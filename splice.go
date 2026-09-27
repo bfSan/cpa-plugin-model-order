@@ -82,9 +82,6 @@ func parseModelList(body []byte) (*modelList, error) {
 		if errSplit != nil {
 			return nil, errSplit
 		}
-		if len(elements) < 2 {
-			return nil, errors.New("nothing to order")
-		}
 		if !allModelItems(elements) {
 			return nil, errors.New("array items are not models")
 		}

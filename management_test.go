@@ -50,6 +50,16 @@ func TestCatalogRecordsPerPort(t *testing.T) {
 	}
 }
 
+func TestCatalogRecordsEmptyListingAfterModelsAreHidden(t *testing.T) {
+	var store catalogStore
+	store.record(portOpenAI, []catalogEntry{{ID: "workbuddy-hy3"}})
+	store.record(portOpenAI, []catalogEntry{})
+	snapshot, ok := store.get(portOpenAI)
+	if !ok || snapshot.Count != 0 || len(snapshot.Entries) != 0 {
+		t.Fatalf("empty listing must replace stale models: %#v, ok=%v", snapshot, ok)
+	}
+}
+
 func TestStatusPayloadReportsRuleAndCatalog(t *testing.T) {
 	if err := loadConfig([]byte("strategy: grouped\norder:\n  - \"gpt-*\"\n")); err != nil {
 		t.Fatalf("config load failed: %v", err)
@@ -222,6 +232,36 @@ func TestPanelSharesCPAThemeContract(t *testing.T) {
 	}
 	if strings.Contains(html, "@media (prefers-color-scheme: dark){\n  :root{--bg:#16181c") {
 		t.Fatal("panel still carries the old standalone dark palette")
+	}
+}
+
+func TestPanelCanRefreshCapturedOpenAIModelsWithoutLosingDraft(t *testing.T) {
+	html := renderPanel()
+	for _, want := range []string{
+		`id="btnRefreshModels"`,
+		`id="modelKeyInput"`,
+		`type="password"`,
+		`sessionStorage.setItem(MODEL_KEY_STORE`,
+		`fetch("/v1/models"`,
+		`"Authorization": "Bearer " + k`,
+		`const d = await call(API + "/status")`,
+		`state.catalogs = Array.isArray(d.catalogs) ? d.catalogs : []`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("panel refresh is missing %q", want)
+		}
+	}
+	refreshStart := strings.Index(html, "async function refreshModels()")
+	if refreshStart < 0 {
+		t.Fatal("refreshModels handler is missing")
+	}
+	refreshEnd := strings.Index(html[refreshStart:], "\n}")
+	if refreshEnd < 0 {
+		t.Fatal("refreshModels handler is not closed")
+	}
+	refresh := html[refreshStart : refreshStart+refreshEnd]
+	if strings.Contains(refresh, "await load()") {
+		t.Fatal("refresh must not reload config and erase unsaved rules")
 	}
 }
 

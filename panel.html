@@ -66,6 +66,8 @@ main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;pad
   display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .card>h2 .hint{font-weight:400;color:var(--mut);font-size:12px}
 .bar{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.key-gate{display:none;gap:8px;align-items:center;flex:1 1 100%}
+.key-gate.open{display:flex}
 .body{padding:10px 14px;overflow:auto;max-height:60vh}
 .note{color:var(--mut);font-size:12px;padding:8px 14px;border-top:1px solid var(--border);background:var(--surface)}
 button{font:inherit;font-size:13px;background:var(--btn-sec);color:var(--fg);border:1px solid var(--border);
@@ -188,6 +190,13 @@ ul.models li:hover .flag,li.pick .flag{opacity:1}
       <select id="port"></select>
       <input type="search" class="grow" id="filter" placeholder="筛选模型 ID">
       <span class="chip" id="cnt"></span>
+      <button id="btnRefreshModels" title="用下游 API Key 重新拉取 OpenAI 模型列表">刷新列表</button>
+      <button class="mini" id="btnChangeModelKey" title="更换用于刷新列表的下游 API Key">更换 Key</button>
+      <div class="key-gate" id="modelKeyGate">
+        <input type="password" class="grow" id="modelKeyInput" placeholder="下游 API Key" autocomplete="off">
+        <button class="mini" id="btnSaveModelKey">确定</button>
+        <button class="mini" id="btnCancelModelKey">取消</button>
+      </div>
     </div>
     <div class="body"><ul class="models" id="models"></ul></div>
     <div class="note">这里列出的是各端口真实收到的 ID。Anthropic 端口是伪装名,想单独控制它就直接点右侧的“精确”,把伪装 ID 写成规则。</div>
@@ -224,6 +233,7 @@ const ENC_PREFIX = "enc::v1::";
 const SECRET_SALT = "cli-proxy-api-webui::secure-storage";
 const PANEL_STORE = "cli-proxy-auth";
 const SS_KEY = "model-order-mgmt-key";
+const MODEL_KEY_STORE = "model-order-downstream-key";
 let keySuppressed = false;
 
 const readSessionKey = () => keySuppressed ? null : (() => { try { return sessionStorage.getItem(SS_KEY); } catch (_) { return null; } })();
@@ -267,6 +277,17 @@ function saveKey(){
 function suppressKey(){ keySuppressed = true; try { sessionStorage.removeItem(SS_KEY); } catch (_) {} document.getElementById("auth").style.display = "none"; }
 function showAuth(){ const el = document.getElementById("auth"); el.style.display = "flex"; const i = document.getElementById("keyInput"); if (i) i.focus(); }
 const authHeaders = k => k ? { "Authorization": "Bearer " + k } : {};
+function getModelKey(){ try { return sessionStorage.getItem(MODEL_KEY_STORE) || ""; } catch (_) { return ""; } }
+function showModelKey(){ $("modelKeyGate").classList.add("open"); $("modelKeyInput").focus(); }
+function hideModelKey(){ $("modelKeyGate").classList.remove("open"); $("modelKeyInput").value = ""; }
+function saveModelKey(){
+  const k = $("modelKeyInput").value.trim();
+  if (!k) return;
+  try { sessionStorage.setItem(MODEL_KEY_STORE, k); }
+  catch (_) { toast("err", "浏览器无法保存会话 Key"); return; }
+  hideModelKey();
+  refreshModels();
+}
 
 async function call(path, opts = {}){
   const k = getKey();
@@ -332,6 +353,38 @@ async function load(){
   markClean(state.configured);
 }
 
+async function refreshModels(){
+  const k = getModelKey();
+  if (!k) { showModelKey(); return; }
+  const button = $("btnRefreshModels");
+  button.disabled = true;
+  try {
+    const response = await fetch("/v1/models", {
+      method: "GET", cache: "no-store", credentials: "omit",
+      headers: { "Authorization": "Bearer " + k }
+    });
+    if (response.status === 401 || response.status === 403) {
+      try { sessionStorage.removeItem(MODEL_KEY_STORE); } catch (_) {}
+      showModelKey();
+      throw new Error("下游 API Key 无效或无权查看模型");
+    }
+    if (!response.ok) throw new Error("模型列表请求失败: HTTP " + response.status);
+    const listing = await response.json();
+    if (!Array.isArray(listing.data)) throw new Error("CPA 未返回 OpenAI 模型列表");
+    const d = await call(API + "/status");
+    state.catalogs = Array.isArray(d.catalogs) ? d.catalogs : [];
+    port = "openai";
+    const current = currentCatalog();
+    const listed = listing.data.map(item => item.id);
+    if (JSON.stringify(current.entries.map(item => item.id)) !== JSON.stringify(listed)) {
+      throw new Error("排序插件尚未捕获这次模型列表");
+    }
+    renderAll();
+    toast("ok", "已刷新 " + current.entries.length + " 个模型");
+  } catch (e) { toast("err", "刷新失败: " + e.message); }
+  finally { button.disabled = false; }
+}
+
 function renderAll(){
   // 策略分段
   document.querySelectorAll("#strategy button").forEach(b => b.classList.toggle("on", b.dataset.v === state.strategy));
@@ -379,7 +432,10 @@ function renderModels(){
   $("cnt").textContent = entries.length + " / " + (currentCatalog().count || 0);
   const box = $("models");
   if (!entries.length) {
-    box.innerHTML = `<li class="empty">先用任一客户端拉一次模型列表,插件会在此处记下 CPA 真实下发的 ID。</li>`;
+    const captured = state.catalogs.some(c => c.port === port);
+    box.innerHTML = captured
+      ? `<li class="empty">当前 API Key 没有可用模型。</li>`
+      : `<li class="empty">先用任一客户端拉一次模型列表,插件会在此处记下 CPA 真实下发的 ID。</li>`;
     return;
   }
   box.innerHTML = entries.map(e => {
@@ -453,7 +509,9 @@ async function renderPreview(){
     ordered = sortIds(cap.entries.map(e => e.id), state.strategy, state.order, state.caseSensitive);
     if (getKey()) toast("err", "预览接口失败,已用本地计算: " + e.message);
   }
-  previewIds = manualOrder.length ? manualOrder.filter(id => ordered.includes(id)) : ordered;
+  previewIds = manualOrder.length
+    ? manualOrder.filter(id => ordered.includes(id)).concat(ordered.filter(id => !manualOrder.includes(id)))
+    : ordered;
   drawPreview();
 }
 let manualOrder = [];
@@ -521,6 +579,11 @@ $("models").addEventListener("click", ev => {
 });
 $("filter").addEventListener("input", () => renderModels());
 $("port").addEventListener("change", ev => { port = ev.target.value; manualOrder = []; previewSel = -1; renderAll(); });
+$("btnRefreshModels").addEventListener("click", refreshModels);
+$("btnChangeModelKey").addEventListener("click", showModelKey);
+$("btnSaveModelKey").addEventListener("click", saveModelKey);
+$("btnCancelModelKey").addEventListener("click", hideModelKey);
+$("modelKeyInput").addEventListener("keydown", ev => { if (ev.key === "Enter") saveModelKey(); });
 
 $("preview").addEventListener("click", ev => {
   const li = ev.target.closest("li"); if (!li || !li.dataset.i) return;

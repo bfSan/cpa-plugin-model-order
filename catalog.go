@@ -48,9 +48,6 @@ type catalogStore struct {
 var catalog catalogStore
 
 func (s *catalogStore) record(port string, entries []catalogEntry) {
-	if len(entries) == 0 {
-		return
-	}
 	snapshot := catalogSnapshot{
 		Port:    port,
 		Count:   len(entries),

@@ -137,6 +137,19 @@ func TestOrderBodyIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestOrderBodyCapturesZeroAndOneModelListings(t *testing.T) {
+	for _, ids := range [][]string{{}, {"workbuddy-hy3"}} {
+		body := listingBody(ids)
+		if _, changed := orderBody(portOpenAI, body); changed {
+			t.Fatalf("%d-model listing should not need rewriting", len(ids))
+		}
+		snapshot, ok := catalog.get(portOpenAI)
+		if !ok || snapshot.Count != len(ids) {
+			t.Fatalf("%d-model listing was not captured: %#v, ok=%v", len(ids), snapshot, ok)
+		}
+	}
+}
+
 func TestOrderBodyKeepsMembershipIntact(t *testing.T) {
 	loadSuggested(t)
 	out, _ := orderBody(portOpenAI, listingBody(serverOrder))

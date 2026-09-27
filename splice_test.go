@@ -95,8 +95,6 @@ func TestReorderPreservesNestedValuesAndEscapes(t *testing.T) {
 func TestParseModelListRejectsNonListings(t *testing.T) {
 	cases := map[string]string{
 		"chat completion":  `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"content":"hi"}}]}`,
-		"single model":     `{"object":"list","data":[{"id":"only"}]}`,
-		"empty data":       `{"object":"list","data":[]}`,
 		"data not array":   `{"data":{"id":"x"},"object":"list"}`,
 		"items without id": `{"data":[{"foo":1},{"bar":2}]}`,
 		"not json":         `{"object":"list","data":`,
@@ -105,6 +103,17 @@ func TestParseModelListRejectsNonListings(t *testing.T) {
 	for name, raw := range cases {
 		if _, errParse := parseModelList([]byte(raw)); errParse == nil {
 			t.Errorf("%s: expected rejection, got no error", name)
+		}
+	}
+}
+
+func TestParseModelListAcceptsSmallListings(t *testing.T) {
+	for name, raw := range map[string]string{
+		"single model": `{"object":"list","data":[{"id":"only"}]}`,
+		"empty data":   `{"object":"list","data":[]}`,
+	} {
+		if _, errParse := parseModelList([]byte(raw)); errParse != nil {
+			t.Errorf("%s: valid small listing rejected: %v", name, errParse)
 		}
 	}
 }
