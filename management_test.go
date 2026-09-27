@@ -265,6 +265,31 @@ func TestPanelCanRefreshCapturedOpenAIModelsWithoutLosingDraft(t *testing.T) {
 	}
 }
 
+func TestRuleRowsUseDragOrderingAndLabeledMatchCounts(t *testing.T) {
+	html := renderPanel()
+	start := strings.Index(html, "function renderRules()")
+	end := strings.Index(html, "function renderModels()")
+	if start < 0 || end <= start {
+		t.Fatal("rule renderer not found")
+	}
+	rules := html[start:end]
+	for _, want := range []string{`class="drag-handle"`, `class="idx"`, `匹配 ${hits} 个模型`} {
+		if !strings.Contains(rules, want) {
+			t.Fatalf("rule row missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{`data-act="up"`, `data-act="down"`, `type="number"`} {
+		if strings.Contains(rules, unwanted) {
+			t.Fatalf("rule row still contains %q", unwanted)
+		}
+	}
+	for _, event := range []string{`"pointerdown"`, `"pointermove"`, `"pointerup"`, `"pointercancel"`} {
+		if !strings.Contains(html, `$("rules").addEventListener(`+event) {
+			t.Fatalf("rule dragging is missing %s handling", event)
+		}
+	}
+}
+
 func marshalWire(t *testing.T, method, path string, body []byte) []byte {
 	t.Helper()
 	raw, err := json.Marshal(managementRequestWire{

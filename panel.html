@@ -91,10 +91,17 @@ label.chk{display:flex;align-items:center;gap:6px;color:var(--mut);user-select:n
   padding:2px 9px;font-size:11px;font-weight:600;color:var(--mut);white-space:nowrap}
 .chip.hit{color:var(--ok);background:var(--ok-soft);border-color:var(--ok-border)}
 .chip.none{color:var(--warn);background:var(--warn-soft);border-color:var(--warn-border)}
-.row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed var(--border);min-width:0}
+.row{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed var(--border);min-width:0;position:relative}
 .row:last-child{border-bottom:0}
 .row input{flex:1 1 120px}
+.row.dragging{opacity:.55}
+.row.drop-before::before,.row.drop-after::after{content:"";position:absolute;left:0;right:0;height:2px;background:var(--acc)}
+.row.drop-before::before{top:0}
+.row.drop-after::after{bottom:0}
+.drag-handle{flex:0 0 26px;width:26px;height:30px;padding:0;cursor:grab;touch-action:none;color:var(--mut);font-size:17px;line-height:1}
+.drag-handle:active{cursor:grabbing}
 .idx{width:22px;text-align:right;color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums;flex:0 0 auto}
+.match-count{flex:0 0 auto;white-space:nowrap;color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
 .name{font-size:12px;overflow-wrap:anywhere;min-width:0}
 .empty{color:var(--mut);padding:16px 2px;font-size:13px;text-align:center}
 ol.rules,ul.models{margin:0;padding:0;list-style:none}
@@ -415,12 +422,11 @@ function renderRules(){
   const ids = currentCatalog().entries.map(e => e.id);
   box.innerHTML = state.order.map((p, i) => {
     const hits = ids.filter(id => testPattern(p, id, state.caseSensitive)).length;
-    return `<li class="row">
+    return `<li class="row" data-i="${i}">
+      <button type="button" class="drag-handle" data-i="${i}" aria-label="拖动第 ${i + 1} 条规则排序" title="拖动排序">⋮⋮</button>
       <span class="idx">${i + 1}</span>
       <input type="text" class="grow" value="${esc(p)}" data-i="${i}">
-      <span class="chip ${hits ? "hit" : "none"}" title="命中当前端口模型数">${hits}</span>
-      <button class="mini" data-act="up" data-i="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
-      <button class="mini" data-act="down" data-i="${i}" ${i === state.order.length - 1 ? "disabled" : ""}>↓</button>
+      <span class="match-count" title="当前端口">匹配 ${hits} 个模型</span>
       <button class="mini" data-act="del" data-i="${i}">删</button>
     </li>`;
   }).join("");
@@ -562,10 +568,79 @@ $("rules").addEventListener("input", ev => {
 $("rules").addEventListener("click", ev => {
   const b = ev.target.closest("button"); if (!b) return;
   const i = +b.dataset.i, act = b.dataset.act;
-  if (act === "del") state.order.splice(i, 1);
-  if (act === "up" && i > 0) { [state.order[i - 1], state.order[i]] = [state.order[i], state.order[i - 1]]; }
-  if (act === "down" && i < state.order.length - 1) { [state.order[i + 1], state.order[i]] = [state.order[i], state.order[i + 1]]; }
+  if (act !== "del") return;
+  state.order.splice(i, 1);
   markDirty(); renderRules(); renderModels(); schedulePreview(0);
+});
+
+function moveRule(from, to){
+  if (from === to || from < 0 || to < 0 || from >= state.order.length || to >= state.order.length) return;
+  const [rule] = state.order.splice(from, 1);
+  state.order.splice(to, 0, rule);
+  markDirty(); renderRules(); renderModels(); schedulePreview(0);
+}
+
+let ruleDrag = null;
+function clearRuleDrop(){
+  $("rules").querySelectorAll(".row").forEach(row => row.classList.remove("drop-before", "drop-after"));
+}
+function updateRuleDrop(y){
+  if (!ruleDrag) return;
+  const rows = [...$("rules").querySelectorAll(".row")];
+  const row = rows.find(item => y < item.getBoundingClientRect().bottom) || rows[rows.length - 1];
+  if (!row) return;
+  const before = y < row.getBoundingClientRect().top + row.getBoundingClientRect().height / 2;
+  const insertAt = Number(row.dataset.i) + (before ? 0 : 1);
+  ruleDrag.to = insertAt > ruleDrag.from ? insertAt - 1 : insertAt;
+  clearRuleDrop();
+  if (ruleDrag.to !== ruleDrag.from) row.classList.add(before ? "drop-before" : "drop-after");
+}
+function scrollRuleList(){
+  if (!ruleDrag) return;
+  if (ruleDrag.moved) {
+    const body = $("rules").parentElement;
+    const bounds = body.getBoundingClientRect();
+    const delta = ruleDrag.y < bounds.top + 28 ? -14 : ruleDrag.y > bounds.bottom - 28 ? 14 : 0;
+    if (delta) { body.scrollTop += delta; updateRuleDrop(ruleDrag.y); }
+  }
+  ruleDrag.frame = requestAnimationFrame(scrollRuleList);
+}
+function finishRuleDrag(pointerId, commit){
+  if (!ruleDrag || ruleDrag.pointerId !== pointerId) return;
+  const {from, to, handle, frame} = ruleDrag;
+  ruleDrag = null;
+  cancelAnimationFrame(frame);
+  if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+  $("rules").querySelectorAll(".row").forEach(row => row.classList.remove("dragging"));
+  clearRuleDrop();
+  if (commit) moveRule(from, to);
+}
+$("rules").addEventListener("pointerdown", ev => {
+  const handle = ev.target.closest(".drag-handle");
+  if (!handle || ruleDrag || (ev.pointerType === "mouse" && ev.button !== 0)) return;
+  const from = Number(handle.dataset.i);
+  ruleDrag = {from, to: from, pointerId: ev.pointerId, handle, startY: ev.clientY, y: ev.clientY, moved: false, frame: 0};
+  handle.setPointerCapture(ev.pointerId);
+  handle.closest(".row").classList.add("dragging");
+  ruleDrag.frame = requestAnimationFrame(scrollRuleList);
+  ev.preventDefault();
+});
+$("rules").addEventListener("pointermove", ev => {
+  if (!ruleDrag || ruleDrag.pointerId !== ev.pointerId) return;
+  ruleDrag.y = ev.clientY;
+  if (Math.abs(ev.clientY - ruleDrag.startY) > 4) ruleDrag.moved = true;
+  if (ruleDrag.moved) updateRuleDrop(ev.clientY);
+});
+$("rules").addEventListener("pointerup", ev => finishRuleDrag(ev.pointerId, true));
+$("rules").addEventListener("pointercancel", ev => finishRuleDrag(ev.pointerId, false));
+$("rules").addEventListener("keydown", ev => {
+  const handle = ev.target.closest(".drag-handle");
+  if (!handle || !["ArrowUp", "ArrowDown"].includes(ev.key)) return;
+  ev.preventDefault();
+  const from = Number(handle.dataset.i);
+  const to = Math.max(0, Math.min(state.order.length - 1, from + (ev.key === "ArrowUp" ? -1 : 1)));
+  moveRule(from, to);
+  $("rules").querySelector(`.drag-handle[data-i="${to}"]`)?.focus();
 });
 
 $("models").addEventListener("click", ev => {
