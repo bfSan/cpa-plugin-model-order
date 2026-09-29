@@ -3,6 +3,8 @@
 A thin [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) plugin that gives the
 model listing endpoints a stable, configured order.
 
+![Model Order panel](docs/images/panel.png)
+
 ## Why this exists
 
 CPA builds `/v1/models` by ranging over a map keyed by model ID and never sorts the
@@ -250,3 +252,7 @@ still deterministic, which is the main fix, but grouping needs real IDs.
 CPA has a native switch for this: set `claude-code.disable-cloaking-model-list:
 true` and the port serves real IDs, at which point the configured order applies
 there too.
+
+## License
+
+[MIT](LICENSE)
