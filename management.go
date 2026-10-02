@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,11 +79,12 @@ func managementRegistration() managementRegistrationResponse {
 	base := "/plugins/" + pluginName
 	return managementRegistrationResponse{
 		Routes: []managementRoute{
-			{Method: http.MethodGet, Path: base + "/status", Description: "Effective ordering rule and the model lists CPA last served per port."},
+			{Method: http.MethodGet, Path: base + "/status", Description: "Effective ordering rule, visibility policies and the model lists CPA last served per port."},
 			{Method: http.MethodPost, Path: base + "/preview", Description: "Apply a candidate rule to a model list and return the resulting order with the rule each model matched."},
+			{Method: http.MethodGet, Path: base + "/alias-report", Description: "Models that reached a client under a bare name, with the oauth-model-alias row each one is missing."},
 		},
 		Resources: []resourceRoute{
-			{Path: "/panel", Menu: "Model Order", Description: "Edit the model listing order rule and preview the result."},
+			{Path: "/panel", Menu: "Model Registry", Description: "Edit the model listing order and per key visibility, preview the result, and add the aliases CPA is missing."},
 		},
 	}
 }
@@ -105,6 +107,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, statusPayload()))
 	case req.Method == http.MethodPost && path == base+"/preview":
 		return handlePreview(req.Body)
+	case req.Method == http.MethodGet && path == base+"/alias-report":
+		return handleAliasReport()
 	case req.Method == http.MethodGet && path == base:
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, statusPayload()))
 	default:
@@ -114,12 +118,53 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 }
 
+// handleAliasReport answers "which models are leaking under a bare name".
+//
+// It reads only the catalog the plugin already recorded from real client
+// traffic, so it needs no upstream call and cannot perturb the listing. When
+// nothing has been captured the response says so instead of returning an empty
+// report that reads like "no problems found".
+func handleAliasReport() ([]byte, error) {
+	snapshots := catalog.list()
+	if len(snapshots) == 0 {
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{
+			"error":   "no_listing_captured",
+			"note":    "pull /v1/models from any client first, then reopen this report",
+			"reports": []aliasReport{},
+		}))
+	}
+	reports := make([]aliasReport, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		reports = append(reports, buildAliasReport(snapshot.Port, snapshot.Entries, nil))
+	}
+	return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{"reports": reports}))
+}
+
 // statusPayload reports the effective rule plus whether it is configured at all.
 // With no built-in fallback, an unconfigured plugin groups nothing, and the panel
 // has to say so plainly rather than dress an empty list up as a default.
 // suggested_order is the editor template and is never applied on its own.
 func statusPayload() map[string]any {
 	cfg := currentConfig()
+	// policies are listed by scope, never by key. The panel needs to show that
+	// a scope is constrained, and an operator who wrote the config can read the
+	// label; the credential behind a scope is not recoverable from the digest and
+	// is deliberately not echoed anywhere.
+	policies := make([]map[string]any, 0, cfg.access.count)
+	for scope, policy := range cfg.access.policies {
+		policies = append(policies, map[string]any{
+			"caller_scope":   scope,
+			"label":          policy.Label,
+			"allow_models":   policy.AllowModels,
+			"deny_models":    policy.DenyModels,
+			"case_sensitive": policy.CaseSensitive,
+		})
+	}
+	sort.SliceStable(policies, func(i, j int) bool {
+		left, _ := policies[i]["caller_scope"].(string)
+		right, _ := policies[j]["caller_scope"].(string)
+		return left < right
+	})
 	return map[string]any{
 		"version":         version,
 		"strategy":        cfg.strategy,
@@ -127,6 +172,8 @@ func statusPayload() map[string]any {
 		"order":           cfg.order,
 		"configured":      len(cfg.order) > 0,
 		"suggested_order": append([]string(nil), suggestedOrder...),
+		"policies":        policies,
+		"policy_count":    cfg.access.count,
 		"catalogs":        catalog.list(),
 	}
 }

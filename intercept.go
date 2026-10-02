@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"sort"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -25,15 +26,69 @@ func isModelListing(req pluginapi.ResponseInterceptRequest) bool {
 	return len(req.Body) > 0
 }
 
-// orderBody rewrites a model listing body into the configured order, and records
-// what was served so the panel can show real ids rather than guesses.
-// The second result reports whether anything changed; a false means the caller
-// should return no body at all so CPA keeps its own bytes.
-func orderBody(sourceFormat string, body []byte) ([]byte, bool) {
+// governBody applies the two list transformations in the order they must happen:
+// visibility first, then ordering, and finally the catalog record.
+//
+// Filtering cannot run after the sort. The sort's job is to make every captured
+// model reachable, and a caller-restricted listing must not put a hidden model
+// back into the response by way of the alphabetical tail. Running filter first
+// also means the catalog records what the most restrictive caller was served,
+// which is the useful thing to show in the panel.
+func governBody(sourceFormat string, headers http.Header, body []byte) ([]byte, bool) {
 	list, errParse := parseModelList(body)
 	if errParse != nil {
 		return nil, false
 	}
+	port := portFor(sourceFormat, readCatalogEntries(list.elements))
+	changed := false
+
+	if policy, ok := resolvePolicy(headers, port); ok {
+		kept := make([][]byte, 0, len(list.elements))
+		for _, element := range list.elements {
+			if policy.allows(modelItemKey(element)) {
+				kept = append(kept, element)
+			}
+		}
+		// The removal itself is a change to the body. Without this, a listing
+		// that filtered successfully but happened to already be in the
+		// configured order would report "unchanged" and hand the caller back
+		// CPA's original bytes, silently reinstating the hidden models.
+		changed = changed || len(kept) != len(list.elements)
+		list.elements = kept
+	}
+
+	_, reordered := reorder(list)
+	changed = changed || reordered
+	entries := readCatalogEntries(list.elements)
+	catalog.record(port, entries)
+	return list.render(), changed
+}
+
+// resolvePolicy finds the visibility rule for this request.
+//
+// The port check is part of the lookup rather than a separate gate so that
+// "no policy for this caller" and "this port is not filtered" return the same
+// thing: nothing to do. Both leave the body untouched, and neither can narrow an
+// unrestricted key, because an unrestricted key has no entry in the table.
+func resolvePolicy(headers http.Header, port string) (*accessPolicy, bool) {
+	if !filterPort(port) {
+		return nil, false
+	}
+	scope := callerScope(callerCredential(headers))
+	if scope == "" {
+		return nil, false
+	}
+	return currentConfig().access.lookup(scope)
+}
+
+// reorder sorts the list elements into the configured order and reports whether
+// the order actually differs from what arrived. A false means the caller should
+// return no body at all so CPA keeps its own bytes.
+//
+// CPA builds the list by ranging over a map, so the incoming order is
+// arbitrary. The list is therefore always reordered rather than trusted to be
+// sorted already.
+func reorder(list *modelList) ([]byte, bool) {
 	cfg := currentConfig()
 	less := comparer(cfg.strategy, cfg.matchers, cfg.caseSensitive)
 
@@ -41,8 +96,6 @@ func orderBody(sourceFormat string, body []byte) ([]byte, bool) {
 	for i, element := range list.elements {
 		keys[i] = modelItemKey(element)
 	}
-	// CPA builds the list by ranging over a map, so the incoming order is
-	// arbitrary. Always reorder rather than trusting "already sorted".
 	order := make([]int, len(list.elements))
 	for i := range order {
 		order[i] = i
@@ -59,12 +112,6 @@ func orderBody(sourceFormat string, body []byte) ([]byte, bool) {
 			changed = true
 		}
 	}
-	entries := readCatalogEntries(reordered)
-	catalog.record(portFor(sourceFormat, entries), entries)
-
-	if !changed {
-		return nil, false
-	}
 	list.elements = reordered
-	return list.render(), true
+	return nil, changed
 }

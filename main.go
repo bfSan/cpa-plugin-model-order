@@ -207,11 +207,11 @@ func handleInterceptResponse(raw []byte) ([]byte, error) {
 	if !isModelListing(req) {
 		return okEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
-	ordered, changed := orderBody(req.SourceFormat, req.Body)
+	governed, changed := governBody(req.SourceFormat, req.RequestHeaders, req.Body)
 	if !changed {
 		return okEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
-	return okEnvelope(pluginapi.ResponseInterceptResponse{Body: ordered})
+	return okEnvelope(pluginapi.ResponseInterceptResponse{Body: governed})
 }
 
 func modelOrderRegistration() registration {

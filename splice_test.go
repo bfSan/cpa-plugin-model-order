@@ -50,7 +50,7 @@ func TestGeminiPortHonoursPrefixPatterns(t *testing.T) {
 	body := []byte(`{"models":[` +
 		`{"name":"models/workbuddy-hy3"},{"name":"models/gpt-6-astra"},{"name":"models/qoder-auto"}` +
 		`]}`)
-	out, changed := orderBody(portGemini, body)
+	out, changed := governBody(portGemini, nil, body)
 	if !changed {
 		t.Fatal("expected gemini listing to be reordered")
 	}
