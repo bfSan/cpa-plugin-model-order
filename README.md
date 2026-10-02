@@ -193,39 +193,73 @@ the body reaches any plugin, so a rule written against a real model name would s
 match nothing. Filtering the Codex catalog matters specifically: a model hidden from a key
 must not reappear merely because the client asked with `?client_version=`.
 
-## Missing aliases
+## Model aliases
 
-`oauth-model-alias` matches exactly, so an upstream model added after the last edit reaches
-clients under its bare name. The panel's alias section scans the listing this plugin has
-already captured from real traffic and reports the gap:
+The panel's alias section is an editor for CPA's `oauth-model-alias`, not just a report. It
+reads the whole table, lets you add, edit and delete any row, create channels, and write
+the result back. CPA's table is the only source of truth; the plugin keeps no copy and
+holds no key.
 
 ```
-channel    model              alias to be added
-workbuddy  space-bunny        workbuddy-space-bunny
-workbuddy  hy4-preview-dev    workbuddy-hy4-preview-dev
+channel      name                alias
+workbuddy    space-bunny          workbuddy-space-bunny
+workbuddy    hy4-preview-dev      workbuddy-hy4-preview-dev
+qoder        auto                 qoder-auto
 ```
 
-`provider/model` names such as cline's `anthropic/claude-opus-5.5` are **not** reported.
-The provider already names them, and prefixing would propose
-`cline-anthropic/claude-opus-5.5`, which no provider serves. On a real 45 model listing
-this skip is the difference between three genuine rows and seven.
-
-Writing goes to CPA, not to the plugin. The panel issues:
+Reading and writing go to CPA itself:
 
 ```
 GET    /v0/management/oauth-model-alias
 PATCH  /v0/management/oauth-model-alias   {"channel": "<provider>", "aliases": [ ... ]}
 ```
 
-Two things about that call are worth stating, because both have bitten this deployment:
+Three properties of that endpoint shape the editor:
 
-- **`PATCH` replaces the whole channel**, it does not merge. The panel therefore reads the
-  full table first and appends to it.
+- **`PATCH` replaces the whole channel**, it does not merge. The panel therefore keeps the
+  loaded table as a read-only baseline and a separate draft, and writes the draft's full
+  channel list.
 - **`PUT` replaces the entire table** across every channel. The panel never issues it.
+- **Only channels that were actually changed are written.** Since a `PATCH` overwrites the
+  channel, a needless write could clobber rows someone added in the meantime, so an
+  untouched channel is never sent. Edited and newly added rows are highlighted, so what a
+  save will do is visible before it does it.
 
-Entries already present for a given `name` are skipped, so the operation is idempotent. CPA
-applies a change on its own schedule; the observed hot apply is about twelve seconds, with
-no restart.
+After a save the panel re-reads the table rather than assuming the write landed, so what
+you see is always what CPA actually stores. CPA applies a change on its own schedule; the
+observed hot apply is about twelve seconds, with no restart.
+
+### Suggesting the missing ones
+
+`oauth-model-alias` matches exactly, so an upstream model added after the last edit reaches
+clients under its bare name. **补齐建议** scans the listing this plugin captured from real
+traffic and offers the gaps for the current channel. Each one is *filled into the editor*
+rather than written, so the normal save and its confirmation still apply.
+
+Which providers are considered is decided by the channels that exist in CPA's own alias
+table, not by how the model names look. That distinction matters: CPA's built-in `openai`
+provider serves `gpt-5.5` and `gpt-6.1-sol` under exactly those names and has no alias
+channel at all, so proposing `openai-gpt-6.1-sol` would invent an alias nobody asked for.
+On a real 45 model listing, guessing from the names produced seventeen rows of which three
+were real.
+
+`provider/model` names such as cline's `anthropic/claude-opus-5.5` are skipped for a
+separate reason: the provider already names them, and prefixing would propose
+`cline-anthropic/claude-opus-5.5`.
+
+### Testing the editor
+
+The Go suite renders the panel HTML but never runs it, so the editor's behaviour is covered
+by a browser test that drives the real page against a stub of CPA's management API. Nothing
+in it can touch a live alias table.
+
+```bash
+PW_DIR=/path/to/node_modules node scripts/alias-editor-test.js
+```
+
+It checks that the table loads, that editing marks only that channel dirty, that saving
+sends the channel's full list, that untouched channels are never sent, that revert restores
+the baseline, and that a duplicate name is refused. It exits 77 when playwright is absent.
 
 ### Pattern syntax
 

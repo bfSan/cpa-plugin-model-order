@@ -1,6 +1,7 @@
-.PHONY: build test lint clean tag
+.PHONY: build test test-panel lint clean tag
 
 GO ?= go
+NODE ?= node
 VERSION ?= $(shell cat VERSION 2>/dev/null || echo "dev")
 LDFLAGS := -X main.version=$(VERSION)
 
@@ -10,6 +11,13 @@ build:
 
 test:
 	$(GO) test -race -count=1 ./...
+
+# The Go tests render the panel but never run it, so the alias editor's behaviour
+# needs a real browser. PW_DIR must point at a node_modules tree holding
+# playwright; the target is not part of `test` because that dependency is not
+# vendored. The script exits 77 when playwright is missing.
+test-panel:
+	$(NODE) scripts/alias-editor-test.js
 
 lint:
 	@test -z "$$($(GO)fmt -l .)" || ($(GO)fmt -l . && exit 1)

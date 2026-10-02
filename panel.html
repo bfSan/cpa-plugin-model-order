@@ -118,6 +118,18 @@ table.alias-table tr:last-child td{border-bottom:0}
 table.alias-table td.pick,table.alias-table th.pick{width:34px}
 table.alias-table code{font-size:11px}
 table.alias-table .will-add{color:var(--ok);font-weight:600}
+table.alias-table td.act{width:1%;white-space:nowrap}
+table.alias-table input.dirty{border-color:var(--warn);background:var(--warn-soft)}
+table.alias-table tr.added td{background:var(--ok-soft)}
+table.alias-table tr.gone td{color:var(--mut)}
+table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:var(--mut)}
+.alias-add td{padding-top:10px}
+.chan-picker{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.chan-tab{padding:4px 10px;border:1px solid var(--border);border-radius:999px;
+  font-size:12px;cursor:pointer;background:var(--surface);color:var(--mut);user-select:none}
+.chan-tab.on{background:var(--acc);border-color:var(--acc);color:var(--on-acc);font-weight:600}
+.chan-tab:hover:not(.on){color:var(--fg);border-color:var(--mut)}
+.chan-count{font-size:11px;opacity:.75;margin-left:4px}
 #auth{padding:10px 16px;background:var(--warn-soft);border-bottom:1px solid var(--warn-border);
   color:var(--warn);display:none;gap:8px;align-items:center;flex-wrap:wrap}
 #toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:9999;max-width:360px}
@@ -218,22 +230,34 @@ table.alias-table .will-add{color:var(--ok);font-weight:600}
   </section>
 
   <section class="card" style="grid-column:1/-1">
-    <h2>缺失的模型别名 <span class="hint">CPA 的 oauth-model-alias 只能精确匹配,新模型在补上条目之前会以裸名外泄</span>
+    <h2>模型别名 <span class="hint">CPA 的 oauth-model-alias,只能精确匹配。这里可以任意增删改</span>
       <span class="spacer"></span><span class="chip" id="aliasCnt"></span></h2>
     <div class="bar">
-      <button id="btnAliasScan">重新扫描</button>
-      <button class="primary" id="btnAliasApply" disabled>写入选中项</button>
+      <button id="btnAliasLoad">从 CPA 读取</button>
+      <button class="primary" id="btnAliasSave" disabled>保存到 CPA</button>
+      <button id="btnAliasRevert" disabled>放弃改动</button>
       <span class="hint" id="aliasHint"></span>
     </div>
     <div class="body">
+      <div class="chan-picker" id="aliasChannels"></div>
+      <div class="bar" style="margin-top:10px">
+        <input type="text" id="aliasNewName" placeholder="上游模型名，如 space-bunny" style="flex:1;min-width:180px">
+        <span class="muted" style="font-size:12px">→</span>
+        <input type="text" id="aliasNewValue" placeholder="对外别名，如 workbuddy-space-bunny" style="flex:1;min-width:180px">
+        <button id="btnAliasAdd">添加</button>
+        <span class="spacer"></span>
+        <button class="mini" id="btnAliasSuggest" title="按插件规则列出当前渠道下还缺别名的裸名">补齐建议</button>
+      </div>
       <table class="alias-table" id="aliasTable">
-        <thead><tr><th class="pick"></th><th>渠道</th><th>模型</th><th>将写入的别名</th></tr></thead>
+        <thead><tr><th>上游模型名 (name)</th><th>对外别名 (alias)</th><th class="act"></th></tr></thead>
         <tbody id="aliasRows"></tbody>
       </table>
+      <ul class="models" id="aliasSuggest" style="margin-top:10px"></ul>
     </div>
     <div class="note" id="aliasNote">
-      写入动作在浏览器里直接调用 CPA 的 <code>/v0/management/oauth-model-alias</code>,插件本身不持有管理密钥,
-      也不保存任何配置。别名始终归 CPA 所有,这里只是替你算好差集。
+      读取与保存都走 CPA 自己的 <code>/v0/management/oauth-model-alias</code>,用的是你已经填的管理密钥;
+      插件不持有密钥也不保存任何别名。别名始终归 CPA 所有,这里只是它的编辑器。
+      <b>保存按渠道整体覆盖</b>,所以只会写「你打开后确实改过」的那些渠道,没碰的渠道一个字节都不动。
     </div>
   </section>
 
@@ -386,9 +410,8 @@ async function load(){
   }
   renderAll();
   markClean(state.configured);
-  // 扫描依赖 catalog，而 catalog 是拦截真实流量时记录的，所以放在 load 之后，
-  // 让面板一打开就能看到当前缺哪些别名，而不是让用户再点一次。
-  await scanAliases();
+  // 别名表直接来自 CPA，不依赖 catalog，所以打开面板就能读到。
+  await loadAliases();
 }
 
 async function refreshModels(){
@@ -419,7 +442,8 @@ async function refreshModels(){
     }
     renderAll();
     toast("ok", "已刷新 " + current.entries.length + " 个模型");
-    await scanAliases();
+    // 刷新模型列表后 catalog 变了，重新扫一次缺失别名，让建议不至于过期。
+    showAliasSuggestions();
   } catch (e) { toast("err", "刷新失败: " + e.message); }
   finally { button.disabled = false; }
 }
@@ -575,136 +599,298 @@ function move(delta){
   drawPreview();
 }
 
-/* ---- 缺失别名：扫描 + 写回 CPA ---- */
-// 别名归 CPA 所有。插件只算差集，真正的写入由这里的浏览器直接调
-// /v0/management/oauth-model-alias 完成，用的是操作者本来就有的管理密钥。
-// 宿主没有"写任意 CPA 配置"的 RPC，所以这条路径是唯一可行的。
+/* ---- 模型别名：读 / 改 / 写 CPA 的 oauth-model-alias ---- */
+// 别名归 CPA 所有，这里是它的编辑器，不是插件的第二份数据源。读和写都走
+// /v0/management/oauth-model-alias，用的是操作者本来就有的管理密钥；宿主没有
+// “写任意 CPA 配置”的 RPC，所以这条路径是唯一可行的。
+//
+// 数据模型刻意保持成 CPA 的原样：一张 channel -> [{name, alias}] 的表。中间
+// 任何地方都不做形状转换，因为 CPA 的 PATCH 是【按 channel 整体替换】而非合并，
+// 一旦本地表示和线上表示不完全一致，覆盖写就会静默丢掉没看见的条目。
 const ALIAS_PATH = MANAGEMENT_BASE_PATH + "/oauth-model-alias";
-let aliasRows = [];
-let aliasPicked = new Set();
 
-async function scanAliases(){
-  const button = $("btnAliasScan");
+// table 是加载到的线上内容（只读基线），draft 是编辑中的副本。只有 draft 与
+// table 有差异的 channel 才会被写回去，没碰过的渠道一个字节都不动。
+let aliasTable = null;      // {channel: [{name, alias}]}，未加载时为 null
+let aliasDraft = null;      // 同上，编辑中
+let aliasDirtyChannels = new Set();
+let aliasChannel = "";     // 当前显示的 channel
+
+async function loadAliases(){
+  const button = $("btnAliasLoad");
   button.disabled = true;
   try {
-    // 渠道列表是判据：只有 CPA 别名表里真实存在的渠道才参与，否则 CPA 内建的
-    // openai（gpt-6.1-sol 等 14 个模型）会被误判为"缺别名"，把真正的 3 条淹没。
-    // 插件读不到这张表（宿主只在 StaticModelRequest 里给别名，而纯响应拦截器
-    // 收不到），所以由这里读出来传过去。
-    let channels = [];
-    try {
-      const table = await call(ALIAS_PATH, { method: "GET" });
-      if (table && typeof table === "object" && !Array.isArray(table)) channels = Object.keys(table);
-    } catch (_) { /* 表读不到就退回按列表判断 */ }
-
-    const d = await call(API + "/alias-report", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channels })
-    });
-    if (d.error === "no_listing_captured") {
-      aliasRows = [];
-      aliasPicked = new Set();
-      renderAlias();
-      $("aliasHint").textContent = d.note || "";
-      toast("err", d.note || "尚未捕获模型列表");
-      return;
+    const raw = await call(ALIAS_PATH, { method: "GET" });
+    // 顶层可能包一层 oauth-model-alias，也可能直接就是表。两种形态都见过，
+    // 所以按形状判断而不是写死键名。
+    const wrapped = raw && typeof raw === "object" && !Array.isArray(raw) && raw["oauth-model-alias"];
+    const body = wrapped ? raw["oauth-model-alias"] : raw;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw new Error("别名表不是预期的 channel 对象");
     }
-    // 只在 OpenAI 端口上提出建议：Codex 目录用 slug 形态，Anthropic 端口的
-    // 名字经 CPA 核心伪装，两者都不适合直接对着填 oauth-model-alias。
-    const report = (d.reports || []).find(r => r.port === "openai") || (d.reports || [])[0];
-    aliasRows = report ? (report.missing || []) : [];
-    aliasPicked = new Set(aliasRows.map((_, i) => i));
+    aliasTable = {};
+    Object.keys(body).forEach(ch => {
+      const rows = Array.isArray(body[ch]) ? body[ch] : [];
+      aliasTable[ch] = rows
+        .filter(r => r && typeof r === "object")
+        .map(r => ({ name: String(r.name == null ? "" : r.name), alias: String(r.alias == null ? "" : r.alias) }));
+    });
+    aliasDraft = JSON.parse(JSON.stringify(aliasTable));
+    aliasDirtyChannels = new Set();
+    if (!Object.prototype.hasOwnProperty.call(aliasDraft, aliasChannel)) {
+      aliasChannel = Object.keys(aliasDraft).sort()[0] || "";
+    }
+    $("aliasHint").textContent = "";
     renderAlias();
-    const skipped = report ? (report.ignored || 0) : 0;
-    $("aliasHint").textContent = skipped ? ("已跳过 " + skipped + " 条(已有别名或 provider/model 直通名)") : "";
-    toast("ok", aliasRows.length ? ("发现 " + aliasRows.length + " 个裸名") : "没有缺失的别名");
-  } catch (e) { toast("err", "扫描失败: " + e.message); }
+    const total = Object.keys(aliasDraft).reduce((n, ch) => n + aliasDraft[ch].length, 0);
+    toast("ok", "已读取 " + Object.keys(aliasDraft).length + " 个渠道，共 " + total + " 条别名");
+  } catch (e) { toast("err", "读取失败: " + e.message); }
   finally { button.disabled = false; }
 }
 
+// aliasIsDirty 逐行比较而不只看长度，所以「改了个别名值」也算改动。
+// 比较前排序，因为 CPA 返回的顺序不保证稳定，而行顺序对 CPA 无意义。
+function aliasIsDirty(ch){
+  const before = (aliasTable && aliasTable[ch]) || [];
+  const after = (aliasDraft && aliasDraft[ch]) || [];
+  if (before.length !== after.length) return true;
+  const line = r => r.name + "" + r.alias;
+  return before.map(line).sort().join("") !== after.map(line).sort().join("");
+}
+
+function aliasTouched(){
+  if (!aliasDraft) return;
+  const chans = new Set(Object.keys(aliasDraft).concat(Object.keys(aliasTable || {})));
+  aliasDirtyChannels = new Set([...chans].filter(aliasIsDirty));
+  renderAlias();
+}
+
+function aliasTotalRows(){
+  return Object.keys(aliasDraft || {}).reduce((n, ch) => n + aliasDraft[ch].length, 0);
+}
+
 function renderAlias(){
+  $("aliasSuggest").innerHTML = "";
+  const picker = $("aliasChannels");
+  picker.innerHTML = "";
   const body = $("aliasRows");
   body.innerHTML = "";
-  $("aliasCnt").textContent = aliasRows.length ? (aliasRows.length + " 条待补") : "";
-  $("btnAliasApply").disabled = aliasPicked.size === 0;
-  $("btnAliasApply").textContent = aliasPicked.size ? ("写入选中 " + aliasPicked.size + " 条") : "写入选中项";
-  if (!aliasRows.length) {
+
+  if (!aliasDraft) {
+    $("aliasCnt").textContent = "";
+    $("btnAliasSave").disabled = true;
+    $("btnAliasRevert").disabled = true;
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 4;
+    td.colSpan = 3;
     td.className = "empty";
-    td.textContent = "当前捕获的模型列表里没有裸名。点“刷新列表”可重新抓取。";
+    td.textContent = "先点“从 CPA 读取”。";
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
-  aliasRows.forEach((row, i) => {
+  const chans = Object.keys(aliasDraft).sort();
+  if (chans.indexOf(aliasChannel) < 0) aliasChannel = chans[0] || "";
+
+  chans.forEach(ch => {
+    const tab = document.createElement("span");
+    const dirty = aliasIsDirty(ch);
+    tab.className = "chan-tab" + (ch === aliasChannel ? " on" : "");
+    tab.textContent = ch;
+    const count = document.createElement("span");
+    count.className = "chan-count";
+    // 带 * 表示保存后这个渠道会和线上不一样。
+    count.textContent = aliasDraft[ch].length + (dirty ? " *" : "");
+    tab.appendChild(count);
+    tab.addEventListener("click", () => { aliasChannel = ch; renderAlias(); });
+    picker.appendChild(tab);
+  });
+  // 渠道本身就是 CPA 表的 key，必须能新建，否则新增的别名无处安放。
+  const addTab = document.createElement("span");
+  addTab.className = "chan-tab";
+  addTab.textContent = "+ 渠道";
+  addTab.addEventListener("click", newChannel);
+  picker.appendChild(addTab);
+
+  const rows = aliasDraft[aliasChannel].slice().sort((a, b) => a.name.localeCompare(b.name));
+  $("aliasCnt").textContent = rows.length + " 条 / 共 " + aliasTotalRows() + " 条";
+  $("btnAliasSave").disabled = aliasDirtyChannels.size === 0;
+  $("btnAliasRevert").disabled = aliasDirtyChannels.size === 0;
+  $("btnAliasSave").textContent = aliasDirtyChannels.size
+    ? ("保存 " + aliasDirtyChannels.size + " 个渠道")
+    : "保存到 CPA";
+
+  if (!rows.length) {
     const tr = document.createElement("tr");
-    const pick = document.createElement("td");
-    pick.className = "pick";
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.checked = aliasPicked.has(i);
-    box.addEventListener("change", () => {
-      if (box.checked) aliasPicked.add(i); else aliasPicked.delete(i);
-      renderAlias();
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "empty";
+    td.textContent = "这个渠道还没有别名，用上面的输入框添加。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+  rows.forEach(row => {
+    const tr = document.createElement("tr");
+    const base = aliasTable[aliasChannel].find(r => r.name === row.name);
+    // 新增行和改过值的行都标绿，这样保存前能一眼看清将要写入什么。
+    if (!base || base.alias !== row.alias) tr.className = "added";
+
+    const editCell = (value, apply) => {
+      const td = document.createElement("td");
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = value;
+      input.spellcheck = false;
+      input.addEventListener("input", () => { apply(input.value); aliasTouched(); });
+      td.appendChild(input);
+      return td;
+    };
+    const nameCell = editCell(row.name, v => { row.name = v; });
+    const aliasCell = editCell(row.alias, v => { row.alias = v; });
+
+    const act = document.createElement("td");
+    act.className = "act";
+    const del = document.createElement("button");
+    del.className = "mini";
+    del.textContent = "删除";
+    del.addEventListener("click", () => {
+      const list = aliasDraft[aliasChannel];
+      const at = list.indexOf(row);
+      if (at >= 0) list.splice(at, 1);
+      aliasTouched();
     });
-    pick.appendChild(box);
-    const channel = document.createElement("td");
-    channel.textContent = row.channel;
-    const model = document.createElement("td");
-    model.textContent = row.model;
-    const alias = document.createElement("td");
-    const code = document.createElement("code");
-    code.className = "will-add";
-    code.textContent = row.alias;
-    alias.appendChild(code);
-    tr.append(pick, channel, model, alias);
+    act.appendChild(del);
+
+    tr.append(nameCell, aliasCell, act);
     body.appendChild(tr);
   });
 }
 
-async function applyAliases(){
-  const chosen = [...aliasPicked].sort((a, b) => a - b).map(i => aliasRows[i]);
-  if (!chosen.length) return;
-  const button = $("btnAliasApply");
+function newChannel(){
+  const asked = prompt("新渠道名（一般是 provider 名，如 workbuddy）");
+  if (!asked) return;
+  const ch = asked.trim().toLowerCase();
+  if (!ch) return;
+  if (Object.prototype.hasOwnProperty.call(aliasDraft, ch)) {
+    toast("err", "渠道 " + ch + " 已存在");
+    return;
+  }
+  aliasDraft[ch] = [];
+  aliasChannel = ch;
+  aliasTouched();
+}
+
+function addAliasRow(){
+  if (!aliasDraft) { toast("err", "先点“从 CPA 读取”"); return; }
+  if (!aliasChannel) { toast("err", "先选一个渠道，或新建一个"); return; }
+  const name = $("aliasNewName").value.trim();
+  const value = $("aliasNewValue").value.trim();
+  if (!name || !value) { toast("err", "上游模型名和对外别名都要填"); return; }
+  const list = aliasDraft[aliasChannel];
+  if (list.some(r => r.name === name)) {
+    toast("err", "该渠道已有同名条目，请直接改那一行");
+    return;
+  }
+  list.push({ name: name, alias: value });
+  $("aliasNewName").value = "";
+  $("aliasNewValue").value = "";
+  $("aliasNewName").focus();
+  aliasTouched();
+}
+
+async function saveAliases(){
+  if (!aliasDraft || aliasDirtyChannels.size === 0) return;
+  const targets = [...aliasDirtyChannels].sort();
+  const summary = targets.map(ch => ch + "：" + aliasDraft[ch].length + " 条").join("\n");
+  if (!confirm("将把这些渠道整体覆盖到 CPA：\n\n" + summary + "\n\n其余渠道不会被触碰。继续？")) return;
+  const button = $("btnAliasSave");
   button.disabled = true;
   try {
-    // PATCH 会【替换整个 channel】而不是合并，所以必须以 GET 到的全量为基底，
-    // 只把选中的行追加进去。绝不能用 PUT：PUT 替换整张表（含所有渠道）。
-    const current = await call(ALIAS_PATH, { method: "GET" });
-    const byChannel = new Map();
-    chosen.forEach(row => {
-      if (!byChannel.has(row.channel)) byChannel.set(row.channel, []);
-      byChannel.get(row.channel).push({ name: row.model, alias: row.alias });
-    });
-    for (const [channel, additions] of byChannel) {
-      const existing = Array.isArray(current[channel]) ? current[channel].slice() : [];
-      const known = new Set(existing.map(e => String(e && e.name)));
-      for (const add of additions) {
-        if (known.has(add.name)) continue;  // 幂等：已登记的跳过
-        existing.push(add);
-        known.add(add.name);
-      }
-      if (existing.length === (Array.isArray(current[channel]) ? current[channel].length : 0)) {
-        toast("ok", channel + " 渠道的别名已是最新，未写入");
-        continue;
-      }
-      // body 必须是 {"channel":X,"aliases":[...]}；直接传 {channel:[...]} 会被
-      // CPA 拒绝并返回 {"error":"invalid channel"}。
+    // 逐渠道 PATCH。body 必须是 {"channel":X,"aliases":[...]}：直接传
+    // {channel:[...]} 会被 CPA 拒绝并返回 {"error":"invalid channel"}。
+    // PATCH 替换整个 channel，所以这里发的是该渠道的完整列表。
+    for (const ch of targets) {
       await call(ALIAS_PATH, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel, aliases: existing })
+        body: JSON.stringify({
+          channel: ch,
+          aliases: aliasDraft[ch].map(r => ({ name: r.name, alias: r.alias }))
+        })
       });
     }
-    toast("ok", "已写入 " + chosen.length + " 条别名，约 12 秒后热生效");
-    await scanAliases();
-  } catch (e) { toast("err", "写入失败: " + e.message); }
-  finally { button.disabled = false; }
+    toast("ok", "已写入 " + targets.length + " 个渠道，约 12 秒后热生效");
+    // 重新读一次而不是就地改基线：让界面显示的永远是 CPA 真正存下来的东西。
+    await loadAliases();
+  } catch (e) { toast("err", "保存失败: " + e.message); }
+  finally { button.disabled = aliasDirtyChannels.size === 0; }
 }
 
+function revertAliases(){
+  if (!aliasDraft || aliasDirtyChannels.size === 0) return;
+  if (!confirm("放弃未保存的改动？")) return;
+  aliasDraft = JSON.parse(JSON.stringify(aliasTable));
+  aliasDirtyChannels = new Set();
+  renderAlias();
+  toast("ok", "已恢复到上次读取的内容");
+}
+
+// 补齐建议只是把插件算出的差集填进编辑区，仍然要人工点保存。它不是一键写入：
+// 建议基于插件的命名规则，而规则未必符合当下的意图。
+async function showAliasSuggestions(){
+  const button = $("btnAliasSuggest");
+  button.disabled = true;
+  try {
+    const d = await call(API + "/alias-report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channels: Object.keys(aliasDraft || {}) })
+    });
+    const list = $("aliasSuggest");
+    list.innerHTML = "";
+    const say = text => {
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = text;
+      list.appendChild(li);
+    };
+    if (d.error === "no_listing_captured") {
+      say(d.note || "尚未捕获模型列表，先用任意客户端拉一次 /v1/models。");
+      return;
+    }
+    // 只在 OpenAI 端口上提建议：Codex 目录是 slug 形态，Anthropic 端口的名字经
+    // CPA 核心伪装，两者都不适合直接对着填 oauth-model-alias。
+    const report = (d.reports || []).find(r => r.port === "openai") || (d.reports || [])[0];
+    const missing = (report && report.missing) || [];
+    const mine = missing.filter(m => !aliasChannel || m.channel === aliasChannel);
+    if (!mine.length) {
+      say(aliasChannel ? ("渠道 " + aliasChannel + " 没有缺失的别名。") : "没有缺失的别名。");
+      return;
+    }
+    mine.forEach(m => {
+      const li = document.createElement("li");
+      const label = document.createElement("code");
+      label.textContent = m.model + "  →  " + m.alias;
+      const spacer = document.createElement("span");
+      spacer.className = "spacer";
+      const known = (aliasDraft[m.channel] || []).some(r => r.name === m.model);
+      const btn = document.createElement("button");
+      btn.className = "mini";
+      btn.textContent = known ? "已存在" : "填入";
+      btn.disabled = known;
+      btn.addEventListener("click", () => {
+        if (!aliasDraft[m.channel]) aliasDraft[m.channel] = [];
+        aliasDraft[m.channel].push({ name: m.model, alias: m.alias });
+        aliasChannel = m.channel;
+        aliasTouched();
+        toast("ok", "已填入编辑区，记得点保存");
+      });
+      li.append(label, spacer, btn);
+      list.appendChild(li);
+    });
+  } catch (e) { toast("err", "扫描失败: " + e.message); }
+  finally { button.disabled = false; }
+}
 /* ---- 事件 ---- */
 $("strategy").addEventListener("click", ev => {
   const b = ev.target.closest("button"); if (!b) return;
@@ -830,8 +1016,13 @@ $("pvUp").addEventListener("click", () => move(-1));
 $("pvDown").addEventListener("click", () => move(1));
 $("pvHome").addEventListener("click", () => move("home"));
 
-$("btnAliasScan").addEventListener("click", scanAliases);
-$("btnAliasApply").addEventListener("click", applyAliases);
+$("btnAliasLoad").addEventListener("click", loadAliases);
+$("btnAliasSave").addEventListener("click", saveAliases);
+$("btnAliasRevert").addEventListener("click", revertAliases);
+$("btnAliasAdd").addEventListener("click", addAliasRow);
+$("btnAliasSuggest").addEventListener("click", showAliasSuggestions);
+$("aliasNewName").addEventListener("keydown", ev => { if (ev.key === "Enter") addAliasRow(); });
+$("aliasNewValue").addEventListener("keydown", ev => { if (ev.key === "Enter") addAliasRow(); });
 
 $("btnDefault").addEventListener("click", () => {
   state.order = state.suggestedOrder.slice(); manualOrder = []; markDirty(); renderAll(); toast("ok", "已填入推荐模板,保存后生效");

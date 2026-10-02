@@ -129,7 +129,7 @@ access:
 	}
 }
 
-// The panel carries the alias UI, so a regression that dropped the section or
+// The panel carries the alias editor, so a regression that dropped the section or
 // the write path would otherwise only show up in a browser.
 func TestPanelCarriesTheAliasSection(t *testing.T) {
 	setManagementBasePath("/v0/management")
@@ -140,12 +140,21 @@ func TestPanelCarriesTheAliasSection(t *testing.T) {
 	html := string(page.Body)
 	for _, needle := range []string{
 		`id="aliasTable"`,
-		`id="btnAliasScan"`,
-		`id="btnAliasApply"`,
+		`id="aliasChannels"`,
+		// Load, save and revert. The editor has to be able to read the table back
+		// as well as write it, or an operator cannot tell what CPA actually holds.
+		`id="btnAliasLoad"`,
+		`id="btnAliasSave"`,
+		`id="btnAliasRevert"`,
+		// Free-form editing: add a row, delete a row, and channels themselves.
+		`id="btnAliasAdd"`,
+		`id="aliasNewName"`,
+		`id="aliasNewValue"`,
+		`newChannel`,
 		// The write path must go to CPA's own alias endpoint, not anywhere else.
 		`/oauth-model-alias"`,
 		`method: "PATCH"`,
-		`{ channel, aliases: existing }`,
+		`channel: ch,`,
 	} {
 		if !strings.Contains(html, needle) {
 			t.Errorf("panel is missing %q", needle)
@@ -153,8 +162,39 @@ func TestPanelCarriesTheAliasSection(t *testing.T) {
 	}
 	// PUT replaces the whole table across every channel, which is the one call
 	// here that would destroy the other providers' aliases.
-	if strings.Contains(html, `ALIAS_PATH, {\n    method: "PUT"`) {
+	if strings.Contains(html, `ALIAS_PATH, {
+    method: "PUT"`) {
 		t.Error("the panel must never PUT the alias table")
+	}
+	// Only channels the operator actually changed may be written: PATCH replaces
+	// the whole channel, so a needless write could clobber rows added by someone
+	// else in the meantime.
+	if !strings.Contains(html, "aliasDirtyChannels") {
+		t.Error("the panel must track which channels were changed")
+	}
+}
+
+// The editor is a full CRUD surface now, not a one-shot "fill the gaps" list, so
+// the section must not be presented as read-only.
+func TestAliasSectionIsEditableNotReadOnly(t *testing.T) {
+	setManagementBasePath("/v0/management")
+	setResourceBasePath("/v0/resource/plugins/model-registry")
+
+	raw, errHandle := handleManagement(marshalWire(t, http.MethodGet, "/v0/resource/plugins/model-registry/panel", nil))
+	page := unwrapMgmt(t, raw, errHandle, nil)
+	html := string(page.Body)
+	// The stale "missing aliases only" framing must be gone.
+	for _, stale := range []string{`id="btnAliasScan"`, `id="btnAliasApply"`, "缺失的模型别名"} {
+		if strings.Contains(html, stale) {
+			t.Errorf("panel still carries the read-only wording %q", stale)
+		}
+	}
+	// Editing goes through a draft rather than the loaded table, so that the save
+	// button can tell "nothing changed" from "changed and reverted".
+	for _, needle := range []string{"let aliasTable", "let aliasDraft", "function aliasIsDirty", "function aliasTouched"} {
+		if !strings.Contains(html, needle) {
+			t.Errorf("panel is missing %q", needle)
+		}
 	}
 }
 
