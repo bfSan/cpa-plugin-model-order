@@ -1,22 +1,45 @@
 # model-registry
 
-A thin [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) plugin that gives the
-model listing endpoints a stable, configured order.
+A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) plugin that decides what a
+model listing endpoint serves: which entries a given API key may see, in what order, and
+which of them are still leaking under a bare name.
 
-![Model Order panel](docs/images/panel.png)
+![Model Registry panel](docs/images/panel.png)
 
 ## Why this exists
 
-CPA builds `/v1/models` by ranging over a map keyed by model ID and never sorts the
-result, so the served order is Go's randomised map order. It is frozen into the
-registry cache and then reshuffled whenever that cache is invalidated, which model
-level cooldowns do routinely. There is no native sort knob, and no field anywhere in
-CPA that stores an order.
+Three questions come up whenever several provider plugins share one CPA, and all three are
+answered by the same thing: the final, cross provider, aliased model list.
 
-This plugin takes the one seam CPA does provide: the response interceptor, which runs
-on model list bodies **after** `oauth-model-alias` substitution. That makes it the
-single place where the final, cross provider, aliased list can be ordered once,
-instead of every provider plugin ordering its own slice of it.
+**Ordering.** CPA builds `/v1/models` by ranging over a map keyed by model ID and never
+sorts the result, so the served order is Go's randomised map order. It is frozen into the
+registry cache and then reshuffled whenever that cache is invalidated, which model level
+cooldowns do routinely. There is no native sort knob, and no field anywhere in CPA that
+stores an order.
+
+**Visibility.** CPA's `api-keys` is a bare string array, and nothing in the request path
+narrows the list a key can see. A key restricted to one provider still receives the full
+catalogue: `key-provider-access` enforces the restriction at call time and returns `403`,
+but the listing was never filtered. Every key therefore learns what every other key can
+reach.
+
+**Aliases.** `oauth-model-alias` matches exactly and has no wildcard syntax, so a new
+upstream model reaches clients under its bare name until someone adds a row for it. In
+this deployment that surfaced as `space-bunny` sitting next to `workbuddy-space-bunny`.
+
+This plugin takes the one seam CPA does provide: the response interceptor, which runs on
+model list bodies **after** `oauth-model-alias` substitution. That makes it the single
+place where the list can be filtered and ordered once, instead of every provider plugin
+deciding something about its own slice of it.
+
+## What this plugin does not do
+
+It does not write CPA configuration. The host exposes no RPC for writing arbitrary
+configuration, and a plugin holding the management key to do it would be a far larger
+thing than one that reports a gap. The alias section of the panel therefore computes the
+difference and then lets the **browser** call `/v0/management/oauth-model-alias`, where
+the operator's management key already lives. The aliases stay CPA's; the plugin drives the
+edit.
 
 ## Install
 
@@ -52,7 +75,7 @@ the plugin imposes no grouping, so the listing is simply alphabetical by model I
 ### Through the panel (recommended)
 
 The plugin ships its own configuration page, registered as a CPA management
-resource, so it appears in CPA's control panel menu as **Model Order**. Open:
+resource, so it appears in CPA's control panel menu as **Model Registry**. Open:
 
 ```text
 http://<cpa-host>:<port>/v0/resource/plugins/model-registry/panel
@@ -104,6 +127,13 @@ model-registry:
     - "*-auto"
     - "gpt-*"
     - "codex-*"
+  access:                  # per API key visibility, optional
+    - caller_scope: "d66e70bffd410d852091e8987d47db72dadb15bd5ff3adf79be21afcd18228b2"
+      label: workbuddy key
+      allow_models: ["workbuddy-*"]
+    - caller_scope: "3178c207645132badb56e19dda732b05a1a6358421ffddc24725f54034f4a51b"
+      label: qoder key
+      deny_models: ["*-preview"]
 ```
 
 | Key | Default | Meaning |
@@ -111,8 +141,91 @@ model-registry:
 | `strategy` | `grouped` | `grouped` puts configured buckets first; `name` sorts the whole list by model ID. |
 | `order` | none | Ordered glob patterns matched against the model ID. Unset means no grouping. Models matching nothing tail the list alphabetically. |
 | `case_sensitive` | `false` | Match and compare model IDs case sensitively. |
+| `access` | none | Per caller visibility rules. Unset means every key sees the full list. |
 
 Within one bucket, and in the unmatched tail, entries sort alphabetically by model ID.
+
+## Per key visibility
+
+### caller_scope
+
+Policies are keyed by `caller_scope`, never by the API key itself, so this file never
+holds a credential. The scope is the same digest CPA uses internally:
+
+```bash
+printf 'cli-proxy-api:caller-scope:v1\0%s' 'wba-...' | sha256sum
+```
+
+The plugin computes it from the request `Authorization` header (or `x-api-key`, which is
+what an Anthropic shaped client sends) and compares digests, so a key never appears in
+config in any form.
+
+### A key with no policy is unrestricted
+
+This is the property that makes the feature safe to deploy. A scope absent from the table
+resolves to no policy, and no policy means the plugin does not touch the listing at all:
+CPA's own bytes are served. An unrestricted key therefore needs no configuration, cannot be
+constrained by accident, and cannot be broken by a typo in someone else's policy.
+
+A policy whose `caller_scope` is empty is **dropped** rather than applied to everyone. An
+unscoped rule is far more likely to be a half written entry than a deliberate "constrain
+all keys", and reading it the other way would restrict keys the operator never meant to
+touch.
+
+### allow and deny
+
+`allow_models` is an allowlist: when non-empty, nothing outside it is visible. `deny_models`
+is subtracted afterwards. An **empty allow list means "no allowlist", not "nothing
+visible"**, so a deny-only policy carves entries out of the full list rather than blanking
+it. Both use the same pattern syntax as `order`.
+
+Filtering runs **before** ordering. That ordering is deliberate: the sort exists to make
+every captured model reachable, so running it first would let a hidden model reappear
+through the alphabetical tail. A filter that removes an entry counts as a change even when
+the survivors are already in the configured order, because otherwise the response would
+fall through to CPA's original bytes and the hidden models would come straight back.
+
+### Which ports are filtered
+
+The OpenAI port and the Codex client catalog (`/v1/models?client_version=…`) are filtered;
+the Claude and Gemini ports are not. Those two cloak or prefix their IDs in CPA core before
+the body reaches any plugin, so a rule written against a real model name would silently
+match nothing. Filtering the Codex catalog matters specifically: a model hidden from a key
+must not reappear merely because the client asked with `?client_version=`.
+
+## Missing aliases
+
+`oauth-model-alias` matches exactly, so an upstream model added after the last edit reaches
+clients under its bare name. The panel's alias section scans the listing this plugin has
+already captured from real traffic and reports the gap:
+
+```
+channel    model              alias to be added
+workbuddy  space-bunny        workbuddy-space-bunny
+workbuddy  hy4-preview-dev    workbuddy-hy4-preview-dev
+```
+
+`provider/model` names such as cline's `anthropic/claude-opus-5.5` are **not** reported.
+The provider already names them, and prefixing would propose
+`cline-anthropic/claude-opus-5.5`, which no provider serves. On a real 45 model listing
+this skip is the difference between three genuine rows and seven.
+
+Writing goes to CPA, not to the plugin. The panel issues:
+
+```
+GET    /v0/management/oauth-model-alias
+PATCH  /v0/management/oauth-model-alias   {"channel": "<provider>", "aliases": [ ... ]}
+```
+
+Two things about that call are worth stating, because both have bitten this deployment:
+
+- **`PATCH` replaces the whole channel**, it does not merge. The panel therefore reads the
+  full table first and appends to it.
+- **`PUT` replaces the entire table** across every channel. The panel never issues it.
+
+Entries already present for a given `name` are skipped, so the operation is idempotent. CPA
+applies a change on its own schedule; the observed hot apply is about twelve seconds, with
+no restart.
 
 ### Pattern syntax
 

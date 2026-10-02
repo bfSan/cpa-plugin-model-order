@@ -22,7 +22,10 @@ type aliasReport struct {
 	Missing  []missingAliasRow `json:"missing"`
 	Ignored  int               `json:"ignored"`
 	Note     string            `json:"note,omitempty"`
-	Existing map[string]int    `json:"existing,omitempty"`
+	// Channels echoes the alias channels the report was judged against, so the
+	// panel can say which providers were considered at all. Empty means the
+	// caller supplied no channel list and the report fell back to the listing.
+	Channels []string `json:"channels,omitempty"`
 }
 
 // missingAliasRow is one model that reaches clients under a bare name, with the
@@ -58,15 +61,55 @@ const (
 // existing is the provider -> alias count summary from the alias table, used
 // only for display. The decision to report a model is made from the captured
 // listing alone: CPA substitutes aliases before the body reaches this plugin, so
-// a model that already has a row arrives here already carrying its alias and is
-// recognised by its prefix rather than by consulting the table again.
-func buildAliasReport(port string, entries []catalogEntry, existing map[string]int) aliasReport {
+// a model that already has a row arrives here already carrying its alias.
+//
+// A provider only participates in aliasing if it actually has a channel in
+// CPA's oauth-model-alias table, and that table is the authority. CPA's built-in
+// providers are the case that makes this necessary: the openai provider serves
+// fourteen models as gpt-5.5, gpt-6.1-sol and so on, and those names are correct
+// rather than missing. Proposing openai-gpt-6.1-sol for all fourteen was the
+// single largest source of noise in the first live run of this report.
+//
+// The channel list is supplied by the caller because the plugin cannot read the
+// alias table itself: the host only exposes OAuthModelAlias through
+// StaticModelRequest, which a pure response interceptor never receives. The panel
+// already fetches the table in order to write it, so it passes the channel names
+// through rather than the plugin guessing.
+//
+// A provider with no channel, or a channel that already covers the model, is
+// skipped. An empty channel set means "unknown", and the report then falls back to
+// judging from the listing, because reporting the openai models would be worse
+// than reporting a few extra rows.
+func buildAliasReport(port string, entries []catalogEntry, channels map[string]bool) aliasReport {
 	report := aliasReport{
 		Port:     port,
 		Captured: len(entries),
 		Missing:  []missingAliasRow{},
-		Existing: existing,
+		Channels: sortedKeys(channels),
 	}
+	// With no channel list the report still has to work, so fall back to reading
+	// adoption off the listing: a provider whose models mostly carry the
+	// <provider>- prefix is using the convention, and its bare names are the gap.
+	total := make(map[string]int, 4)
+	prefixed := make(map[string]int, 4)
+	for _, entry := range entries {
+		provider := strings.ToLower(strings.TrimSpace(entry.OwnedBy))
+		if provider == "" {
+			continue
+		}
+		total[provider]++
+		if strings.HasPrefix(strings.TrimSpace(entry.ID), providerPrefix(provider)) {
+			prefixed[provider]++
+		}
+	}
+	participates := func(provider string) bool {
+		if len(channels) > 0 {
+			return channels[provider]
+		}
+		count := total[provider]
+		return count > 0 && prefixed[provider]*2 >= count
+	}
+
 	// seen guards the report against a listing that repeats a model, which a
 	// multi channel deployment can produce when two providers expose the same
 	// upstream model.
@@ -91,6 +134,10 @@ func buildAliasReport(port string, entries []catalogEntry, existing map[string]i
 			// These are not missing aliases, and the plan document records that
 			// treating them as such is the mistake that inflates the report from
 			// three rows to seven.
+			report.Ignored++
+			continue
+		case !participates(provider):
+			// openai and cline: no alias channel, and their names are intended.
 			report.Ignored++
 			continue
 		case strings.HasPrefix(id, providerPrefix(provider)):
@@ -120,6 +167,18 @@ func buildAliasReport(port string, entries []catalogEntry, existing map[string]i
 		report.Note = "every captured model already carries a provider prefixed alias"
 	}
 	return report
+}
+
+// sortedKeys turns a channel set into a stable, sorted slice for display.
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for key, on := range set {
+		if on {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // aliasChannelStatus summarises the alias table per provider, for the panel.

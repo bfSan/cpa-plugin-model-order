@@ -69,6 +69,15 @@ func (s *catalogStore) get(port string) (catalogSnapshot, bool) {
 	return snapshot, ok
 }
 
+// reset drops every recorded listing. It exists for tests, which need the store
+// to start from a known state rather than from whatever an earlier case left
+// behind.
+func (s *catalogStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshots = nil
+}
+
 // list returns one snapshot per port, newest first, so the panel can default to
 // whatever the user most recently asked a client for.
 func (s *catalogStore) list() []catalogSnapshot {

@@ -81,7 +81,8 @@ func managementRegistration() managementRegistrationResponse {
 		Routes: []managementRoute{
 			{Method: http.MethodGet, Path: base + "/status", Description: "Effective ordering rule, visibility policies and the model lists CPA last served per port."},
 			{Method: http.MethodPost, Path: base + "/preview", Description: "Apply a candidate rule to a model list and return the resulting order with the rule each model matched."},
-			{Method: http.MethodGet, Path: base + "/alias-report", Description: "Models that reached a client under a bare name, with the oauth-model-alias row each one is missing."},
+			{Method: http.MethodGet, Path: base + "/alias-report", Description: "Models that reached a client under a bare name, judged from the listing alone when no channel list is given."},
+			{Method: http.MethodPost, Path: base + "/alias-report", Description: "Models that reached a client under a bare name, given the alias channels they were judged against."},
 		},
 		Resources: []resourceRoute{
 			{Path: "/panel", Menu: "Model Registry", Description: "Edit the model listing order and per key visibility, preview the result, and add the aliases CPA is missing."},
@@ -108,7 +109,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 	case req.Method == http.MethodPost && path == base+"/preview":
 		return handlePreview(req.Body)
 	case req.Method == http.MethodGet && path == base+"/alias-report":
-		return handleAliasReport()
+		return handleAliasReport(nil)
+	case req.Method == http.MethodPost && path == base+"/alias-report":
+		return handleAliasReport(req.Body)
 	case req.Method == http.MethodGet && path == base:
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, statusPayload()))
 	default:
@@ -118,13 +121,40 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 }
 
+// aliasReportRequest carries the alias channel names the report should judge
+// against.
+type aliasReportRequest struct {
+	// Channels lists the providers that have a channel in CPA's
+	// oauth-model-alias table. The panel reads that table anyway in order to
+	// write it, so it passes the names through rather than the plugin guessing
+	// which providers participate: CPA's built-in openai serves gpt-6.1-sol and
+	// friends under their intended names and has no channel at all, and treating
+	// its fourteen models as missing aliases buried the real report in noise.
+	//
+	// Empty is allowed and means "unknown": the report then judges from the
+	// listing instead.
+	Channels []string `json:"channels"`
+}
+
 // handleAliasReport answers "which models are leaking under a bare name".
 //
 // It reads only the catalog the plugin already recorded from real client
 // traffic, so it needs no upstream call and cannot perturb the listing. When
 // nothing has been captured the response says so instead of returning an empty
 // report that reads like "no problems found".
-func handleAliasReport() ([]byte, error) {
+func handleAliasReport(body []byte) ([]byte, error) {
+	var req aliasReportRequest
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			return okEnvelope(mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": "invalid_body"}))
+		}
+	}
+	channels := make(map[string]bool, len(req.Channels))
+	for _, name := range req.Channels {
+		if trimmed := strings.ToLower(strings.TrimSpace(name)); trimmed != "" {
+			channels[trimmed] = true
+		}
+	}
 	snapshots := catalog.list()
 	if len(snapshots) == 0 {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{
@@ -135,7 +165,7 @@ func handleAliasReport() ([]byte, error) {
 	}
 	reports := make([]aliasReport, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		reports = append(reports, buildAliasReport(snapshot.Port, snapshot.Entries, nil))
+		reports = append(reports, buildAliasReport(snapshot.Port, snapshot.Entries, channels))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{"reports": reports}))
 }
