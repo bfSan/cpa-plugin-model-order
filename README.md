@@ -1,4 +1,4 @@
-# model-order
+# model-registry
 
 A thin [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (CPA) plugin that gives the
 model listing endpoints a stable, configured order.
@@ -24,8 +24,8 @@ Build the plugin on the CPA host (it is `-buildmode=c-shared`, so build it where
 runs):
 
 ```bash
-CGO_ENABLED=1 go build -trimpath -buildmode=c-shared -ldflags "-s -w" -o model-order.so .
-install -m 755 model-order.so /opt/cpa/plugins/model-order.so
+CGO_ENABLED=1 go build -trimpath -buildmode=c-shared -ldflags "-s -w" -o model-registry.so .
+install -m 755 model-registry.so /opt/cpa/plugins/model-registry.so
 ```
 
 Then register it and, importantly, give it the **lowest** priority so it runs last in
@@ -37,7 +37,7 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
-    model-order:
+    model-registry:
       enabled: true
       priority: -100
 ```
@@ -55,7 +55,7 @@ The plugin ships its own configuration page, registered as a CPA management
 resource, so it appears in CPA's control panel menu as **Model Order**. Open:
 
 ```text
-http://<cpa-host>:<port>/v0/resource/plugins/model-order/panel
+http://<cpa-host>:<port>/v0/resource/plugins/model-registry/panel
 ```
 
 It is a single page with three panes:
@@ -71,7 +71,7 @@ It is a single page with three panes:
   turned into an exact rule list with one click.
 
 Saving writes `strategy`, `order` and `case_sensitive` through CPA's own
-`PATCH /v0/management/plugins/model-order/config`, which persists them into
+`PATCH /v0/management/plugins/model-registry/config`, which persists them into
 `config.yaml` and hot reloads the plugin. No restart, no hand editing.
 
 The page needs the CPA management key. It picks it up automatically when opened
@@ -94,7 +94,7 @@ once shipped as a syntax error and left the panel blank.
 The panel edits the same keys documented here, so either route works.
 
 ```yaml
-model-order:
+model-registry:
   enabled: true
   priority: -100
   strategy: grouped        # grouped (default) | name
@@ -195,7 +195,7 @@ check which spelling a given ID reached in.
 
 The panel persists through CPA, so CPA itself has to be able to write its own
 config file. If `config.yaml` is not writable by the user the CPA process runs as,
-`PATCH /v0/management/plugins/model-order/config` fails with HTTP 500 and the panel
+`PATCH /v0/management/plugins/model-registry/config` fails with HTTP 500 and the panel
 reports 保存失败, even though the rule and the key are both fine.
 
 This is easy to cause by editing the file with `sudo tee` or `sudo mv`, which leaves

@@ -3,5 +3,5 @@
 dist/
 *.test
 .DS_Store
-cpa-plugin-model-order
-model-order
+cpa-plugin-model-registry
+model-registry

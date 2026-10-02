@@ -149,9 +149,9 @@ func TestPreviewRejectsBadBody(t *testing.T) {
 
 func TestHandleManagementServesPanelAnd404sUnknown(t *testing.T) {
 	setManagementBasePath("/v0/management")
-	setResourceBasePath("/v0/resource/plugins/model-order")
+	setResourceBasePath("/v0/resource/plugins/model-registry")
 
-	raw, errHandle := handleManagement(marshalWire(t, http.MethodGet, "/v0/resource/plugins/model-order/panel", nil))
+	raw, errHandle := handleManagement(marshalWire(t, http.MethodGet, "/v0/resource/plugins/model-registry/panel", nil))
 	page := unwrapMgmt(t, raw, errHandle, nil)
 	html := string(page.Body)
 	if page.StatusCode != http.StatusOK {
@@ -173,7 +173,7 @@ func TestHandleManagementServesPanelAnd404sUnknown(t *testing.T) {
 		t.Fatalf("panel did not stamp a valid MANAGEMENT_BASE_PATH literal")
 	}
 
-	raw, errHandle = handleManagement(marshalWire(t, http.MethodGet, "/v0/management/plugins/model-order/nope", nil))
+	raw, errHandle = handleManagement(marshalWire(t, http.MethodGet, "/v0/management/plugins/model-registry/nope", nil))
 	missing := unwrapMgmt(t, raw, errHandle, nil)
 	if missing.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown path should 404, got %d", missing.StatusCode)
@@ -187,8 +187,8 @@ func TestHandleManagementServesPanelAnd404sUnknown(t *testing.T) {
 // only answers prefers-color-scheme renders light inside a dark CPA panel, and
 // the token names have to match so a CPA theme change reaches this page.
 func TestPanelSharesCPAThemeContract(t *testing.T) {
-	setResourceBasePath("/v0/resource/plugins/model-order")
-	raw, errHandle := handleManagement(marshalWire(t, http.MethodGet, "/v0/resource/plugins/model-order/panel", nil))
+	setResourceBasePath("/v0/resource/plugins/model-registry")
+	raw, errHandle := handleManagement(marshalWire(t, http.MethodGet, "/v0/resource/plugins/model-registry/panel", nil))
 	page := unwrapMgmt(t, raw, errHandle, nil)
 	html := string(page.Body)
 

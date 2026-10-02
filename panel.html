@@ -232,15 +232,15 @@ ul.models li:hover .flag,li.pick .flag{opacity:1}
 // The host injects a quoted JS literal here, so the placeholder must not sit
 // inside its own quotes.
 const MANAGEMENT_BASE_PATH = __MO_MANAGEMENT_BASE_PATH_JSON__;
-const API = MANAGEMENT_BASE_PATH + "/plugins/model-order";
-const PLUGIN_CONFIG_PATH = MANAGEMENT_BASE_PATH + "/plugins/model-order/config";
+const API = MANAGEMENT_BASE_PATH + "/plugins/model-registry";
+const PLUGIN_CONFIG_PATH = MANAGEMENT_BASE_PATH + "/plugins/model-registry/config";
 
 /* ---- 管理密钥: URL ?key= > sessionStorage > CPA 主面板 localStorage ---- */
 const ENC_PREFIX = "enc::v1::";
 const SECRET_SALT = "cli-proxy-api-webui::secure-storage";
 const PANEL_STORE = "cli-proxy-auth";
-const SS_KEY = "model-order-mgmt-key";
-const MODEL_KEY_STORE = "model-order-downstream-key";
+const SS_KEY = "model-registry-mgmt-key";
+const MODEL_KEY_STORE = "model-registry-downstream-key";
 let keySuppressed = false;
 
 const readSessionKey = () => keySuppressed ? null : (() => { try { return sessionStorage.getItem(SS_KEY); } catch (_) { return null; } })();

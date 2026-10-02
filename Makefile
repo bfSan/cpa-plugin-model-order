@@ -6,7 +6,7 @@ LDFLAGS := -X main.version=$(VERSION)
 
 # Default target: build the plugin for the current platform.
 build:
-	CGO_ENABLED=1 $(GO) build -buildmode=c-shared -ldflags "$(LDFLAGS)" -o model-order.so .
+	CGO_ENABLED=1 $(GO) build -buildmode=c-shared -ldflags "$(LDFLAGS)" -o model-registry.so .
 
 test:
 	$(GO) test -race -count=1 ./...
@@ -16,7 +16,7 @@ lint:
 	$(GO) vet ./...
 
 clean:
-	rm -f model-order.so model-order.h
+	rm -f model-registry.so model-registry.h
 
 # Tag a release from the VERSION file (usage: make tag).
 tag:

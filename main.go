@@ -1,18 +1,31 @@
-// Package main implements model-order, a thin CLIProxyAPI plugin that gives the
-// model listing endpoints a stable, configured order.
-//
-// CPA builds /v1/models by ranging over a map keyed by model ID and never sorts
-// the result, so the served order is Go's randomised map order and it reshuffles
-// whenever the registry cache is invalidated, which model level cooldowns do
-// routinely. There is no native sort knob and nowhere in CPA is an order stored,
-// so the ordering rule has to live in a plugin.
+// Package main implements model-registry, a CLIProxyAPI plugin that governs what
+// a model listing endpoint serves: which entries a given API key may see, and in
+// what order.
 //
 // The plugin hooks the response interceptor, which CPA runs on model list bodies
 // after alias substitution. That is the one seam where a plugin sees the final
 // cross provider list, and it is the seam upstream points at for list rewrites.
 //
+// Three responsibilities live here, all answering "what does this key's list
+// look like", and none of them writes CPA configuration:
+//
+//   - filtering: the caller identity is derived from the request Authorization
+//     header and matched against a per scope allow/deny policy. A scope with no
+//     policy is served the untouched list, so an unrestricted key needs no
+//     configuration and cannot be constrained by accident.
+//   - ordering: CPA builds /v1/models by ranging over a map keyed by model ID and
+//     never sorts the result, so the served order is Go's randomised map order
+//     and it reshuffles whenever the registry cache is invalidated, which model
+//     level cooldowns do routinely.
+//   - alias hygiene: the panel reports models that reach clients under a bare
+//     name because oauth-model-alias has no wildcards, and writes the missing
+//     entries through the management API. The aliases stay CPA's; the plugin
+//     only drives the edit from the browser, where the operator's management key
+//     already lives.
+//
 // Deploy it with the lowest plugin priority so it runs last in the interceptor
-// chain and its order is the one that survives.
+// chain and its order is the one that survives. Filtering has to run before
+// ordering, because a filtered entry must not reappear through the sort's tail.
 package main
 
 /*
@@ -60,7 +73,7 @@ import (
 )
 
 const (
-	pluginName    = "model-order"
+	pluginName    = "model-registry"
 	pluginAuthor  = "bfSan"
 	pluginRepoURL = "https://github.com/bfSan/cpa-plugin-model-order"
 )

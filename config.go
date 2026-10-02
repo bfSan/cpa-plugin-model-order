@@ -7,7 +7,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// rawConfig mirrors the plugin section under plugins.configs.model-order.
+// rawConfig mirrors the plugin section under plugins.configs.model-registry.
 // `enabled` and `priority` belong to CPA and are read by the host, not here.
 type rawConfig struct {
 	Strategy      string   `yaml:"strategy"`
@@ -43,7 +43,7 @@ func loadConfig(yamlBytes []byte) error {
 	if len(yamlBytes) > 0 {
 		var parsed rawConfig
 		if err := yaml.Unmarshal(yamlBytes, &parsed); err != nil {
-			return fmt.Errorf("model-order: invalid config yaml: %w", err)
+			return fmt.Errorf("model-registry: invalid config yaml: %w", err)
 		}
 		switch parsed.Strategy {
 		case "":
@@ -51,7 +51,7 @@ func loadConfig(yamlBytes []byte) error {
 		case StrategyGrouped, StrategyName:
 			next.strategy = parsed.Strategy
 		default:
-			return fmt.Errorf("model-order: unknown strategy %q, want grouped or name", parsed.Strategy)
+			return fmt.Errorf("model-registry: unknown strategy %q, want grouped or name", parsed.Strategy)
 		}
 		next.caseSensitive = parsed.CaseSensitive
 		if len(parsed.Order) > 0 {

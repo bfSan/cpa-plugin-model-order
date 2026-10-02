@@ -10,7 +10,7 @@
 # Usage: ./scripts/panel-smoke.sh [panel-url]
 set -uo pipefail
 
-URL="${1:-http://192.168.110.185:8317/v0/resource/plugins/model-order/panel}"
+URL="${1:-http://192.168.110.185:8317/v0/resource/plugins/model-registry/panel}"
 CHROME="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 [ -x "$CHROME" ] || CHROME="$(command -v chromium || command -v google-chrome || true)"
 [ -n "$CHROME" ] || { echo "SKIP: no chrome/chromium binary (set CHROME=)"; exit 0; }
