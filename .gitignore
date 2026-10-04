@@ -3,5 +3,10 @@
 dist/
 *.test
 .DS_Store
+# Built plugin binaries, under both the current and the legacy name. The old
+# name was missing when 7ff95cf committed one by accident, and cpa-plugin-model-registry
+# alone did not cover it.
 cpa-plugin-model-registry
+cpa-plugin-model-order
 model-registry
+model-order
