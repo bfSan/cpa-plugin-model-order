@@ -880,6 +880,18 @@ function addAliasRow(){
   }
   // 新行只有两个可见字段；不要凭空写 force-mapping。是否强制改名是 CPA 配置
   // 的语义，面板不替操作者决定，也不去猜。
+  // 但 CPA 会静默丢弃的两类行必须在输入时就拦下：同名（name == alias）与同渠道
+  // 内 alias 重复。加了不生效又不报错，只会在保存时表现为难以理解的
+  // 404 channel not found，或者回来发现少了几条。
+  if (name.toLowerCase() === value.toLowerCase()) {
+    toast("err", "上游模型名和对外别名不能相同：CPA 会丢弃这种行。要引入新 id 请填一个不同的别名");
+    return;
+  }
+  const dup = list.find(r => String(r.alias).trim().toLowerCase() === value.toLowerCase());
+  if (dup) {
+    toast("err", "对外别名 " + value + " 已被「" + dup.name + "」占用：CPA 会把重复的那条丢掉");
+    return;
+  }
   list.push({ name: name, alias: value });
   $("aliasNewName").value = "";
   $("aliasNewValue").value = "";
@@ -911,6 +923,57 @@ async function deleteAliasChannel(ch){
   await call(ALIAS_PATH + "?channel=" + encodeURIComponent(ch), { method: "DELETE" });
 }
 
+// ---- CPA 会静默丢弃的别名行 ----------------------------------------------
+//
+// CPA 在每次读写别名表时都跑 SanitizeOAuthModelAlias()（internal/config/
+// config_normalization.go，v7.3.7 与 v8.0.16 两版一致），它按顺序丢掉四类行：
+//
+//   §1 name 或 alias 为空
+//   §2 strings.EqualFold(name, alias) —— 上下文字母不敏感地相等
+//   §3 同渠道内 alias 重复（保留第一条）
+//   §4 清洗后整个渠道为空
+//
+// 丢弃是【静默】的：PATCH 不报错，只是写进去的行变少。§4 更糟——渠道被清空后
+// 落到 PATCH 的 len(normalized)==0 分支，因为线上还没有这个渠道，于是返回
+// 404 {"error":"channel not found"}，文案看起来像"渠道名不存在"，与真实原因
+//（有一行同名被丢）毫无关系。这正是用户填 name=gpt-6.1-sol / alias=gpt-6.1-sol
+// 时看到的现象。§2 命中是没用的写法：name==alias 只是"不改名"，等同于不加
+// 这一行；真要引入一个新 id，必须让 alias 与 name 不同。
+//
+// aliasDroppedRows 复刻这套规则，返回 [{name, alias, reason}]，让面板在发请求
+// 之前就能说清哪几行会被丢、为什么，而不是让操作者对着 channel not found 猜。
+function aliasDroppedRows(rows){
+  const dropped = [];
+  const seenAlias = new Map(); // lower(alias) -> 首次出现的行号(1-based)
+  (rows || []).forEach((row, i) => {
+    const at = i + 1;
+    const name = String(row.name == null ? "" : row.name).trim();
+    const alias = String(row.alias == null ? "" : row.alias).trim();
+    if (!name || !alias) {
+      dropped.push({ name, alias, at, reason: "名称为空" });
+      return;
+    }
+    if (name.toLowerCase() === alias.toLowerCase()) {
+      dropped.push({ name, alias, at, reason: "与原模型名相同（CPA 会丢弃，不写即可）" });
+      return;
+    }
+    const key = alias.toLowerCase();
+    if (seenAlias.has(key)) {
+      dropped.push({ name, alias, at, reason: "与「" + seenAlias.get(key) + "」的对外别名重复" });
+      return;
+    }
+    seenAlias.set(key, name);
+  });
+  return dropped;
+}
+
+// aliasDroppedSummary 把丢弃行渲染成给操作者看的多行摘要。
+function aliasDroppedSummary(ch, dropped){
+  return dropped
+    .map(d => "  · 第 " + d.at + " 行 " + d.name + " → " + d.alias + "：" + d.reason)
+    .join("\n");
+}
+
 async function saveAliases(){
   if (!aliasDraft || aliasDirtyChannels.size === 0) return;
   const targets = [...aliasDirtyChannels].sort();
@@ -929,6 +992,24 @@ async function saveAliases(){
     toast("err", "这些渠道都是空的。CPA 不接受空渠道，请至少添加一条别名");
     return;
   }
+
+  // 写前预检：CPA 会静默丢弃的行在这里就说清楚。不做这层检查的话，命中 §4
+  // 的渠道（全部行都被丢）会以 404 channel not found 回来，把真实原因掩盖成
+  // 一个"渠道名不存在"的假象。
+  const dropReport = writable
+    .map(ch => ({ ch, dropped: aliasDroppedRows(aliasDraft[ch]) }))
+    .filter(x => x.dropped.length);
+  if (dropReport.length) {
+    const detail = dropReport.map(x => x.ch + "：\n" + aliasDroppedSummary(x.ch, x.dropped)).join("\n");
+    const willEmpty = dropReport
+      .filter(x => x.dropped.length === (aliasDraft[x.ch] || []).length)
+      .map(x => x.ch);
+    const tail = willEmpty.length
+      ? "\n\n其中 " + willEmpty.join("、") + " 的行会被全部丢弃，CPA 只会回一个看不懂的 404 channel not found。"
+      : "\n\n继续保存的话，上面这些行不会生效。";
+    if (!confirm("下面这些行 CPA 会按规则丢弃：\n\n" + detail + tail + "\n\n仍要继续吗？")) return;
+  }
+
   if (!confirm("将写入 CPA：\n\n" + lines.join("\n") + "\n\n其余渠道不会被触碰。继续？")) return;
 
   const button = $("btnAliasSave");
@@ -955,7 +1036,16 @@ async function saveAliases(){
     if (skipNew.length) done.push("跳过 " + skipNew.length + " 个空渠道");
     toast("ok", done.join("，") + "；约 12 秒后热生效");
     // 重新读一次而不是就地改基线：让界面显示的永远是 CPA 真正存下来的东西。
+    const submitted = writable.map(ch => ({ ch, n: (aliasDraft[ch] || []).length }));
     await loadAliases();
+    // 写后核对：CPA 的丢弃是静默的，只有比对行数才能发现"提交了 N 条、只存下
+    // M 条"。这一步是 §3（alias 重复）唯一能被看见的地方——它没有 §2 那样的
+    // 404 副作用，写完看起来一切正常。
+    const shortfall = submitted.filter(s => ((aliasTable && aliasTable[s.ch]) || []).length < s.n);
+    if (shortfall.length) {
+      toast("err", "有行未写入：" + shortfall.map(s =>
+        s.ch + " 提交 " + s.n + " 条、实际 " + ((aliasTable[s.ch] || []).length) + " 条").join("；"));
+    }
   } catch (e) { toast("err", "保存失败: " + e.message); }
   finally { button.disabled = aliasDirtyChannels.size === 0; }
 }

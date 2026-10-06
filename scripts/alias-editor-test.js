@@ -94,12 +94,27 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'invalid channel' }));
       }
-      if (b.aliases.length === 0) {
+      // Mirror CPA's SanitizeOAuthModelAlias() as well: it drops empty rows,
+      // same-name rows (EqualFold) and duplicate aliases, and then — if the
+      // channel is left empty — answers 404 channel not found. Without this the
+      // suite cannot tell a panel-side guard from CPA's silent loss.
+      const seenAlias = new Set();
+      const clean = b.aliases.filter(r => {
+        const name = String(r.name == null ? '' : r.name).trim();
+        const alias = String(r.alias == null ? '' : r.alias).trim();
+        if (!name || !alias) return false;
+        if (name.toLowerCase() === alias.toLowerCase()) return false;
+        const key = alias.toLowerCase();
+        if (seenAlias.has(key)) return false;
+        seenAlias.add(key);
+        return true;
+      });
+      if (clean.length === 0) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'channel not found' }));
       }
       // PATCH replaces the whole channel, row fields included.
-      table[b.channel] = b.aliases;
+      table[b.channel] = clean;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ status: 'ok' }));
     }
@@ -304,6 +319,76 @@ function check(name, ok, extra) {
   check('R4 the emptied channel was DELETEd', deleteLog.includes('brandnew'), JSON.stringify(deleteLog));
   check('R4 the emptied channel was not PATCHed empty',
     patchLog.every(p => p.channel !== 'brandnew'), JSON.stringify(patchLog));
+
+  // R5 (Bug 4): CPA silently drops same-name and duplicate-alias rows.
+  // Symptom: name=gpt-6.1-sol / alias=gpt-6.1-sol answered 404 "channel not
+  // found", which looks like a channel-name problem but is really CPA's
+  // SanitizeOAuthModelAlias() dropping the row and then emptying the channel.
+  await page.click('#btnAliasLoad');
+  await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length > 0, null, { timeout: 8000 });
+  // (a) the add-row path refuses a same-name row outright.
+  await page.evaluate(() => { window.prompt = () => 'dupchan'; });
+  await page.click('#aliasChannels .chan-tab:last-child'); // "+ 渠道"
+  await page.waitForTimeout(300);
+  await page.fill('#aliasNewName', 'gpt-6.1-sol');
+  await page.fill('#aliasNewValue', 'gpt-6.1-sol');
+  await page.click('#btnAliasAdd');
+  await page.waitForTimeout(300);
+  check('R5 same-name row is refused at input time',
+    (await page.$$('#aliasRows input')).length === 0,
+    JSON.stringify(await page.$$eval('#aliasRows input', e => e.map(x => x.value))));
+  check('R5 the refusal explains why',
+    (await page.$$eval('.toast', e => e.map(x => x.textContent))).some(t => t.includes('不能相同')),
+    JSON.stringify(await page.$$eval('.toast', e => e.map(x => x.textContent))));
+  // (b) a row that differs only by case is refused too (CPA uses EqualFold).
+  await page.fill('#aliasNewName', 'GPT-6.1-Sol');
+  await page.fill('#aliasNewValue', 'gpt-6.1-sol');
+  await page.click('#btnAliasAdd');
+  await page.waitForTimeout(300);
+  check('R5 case-only difference is refused as well',
+    (await page.$$('#aliasRows input')).length === 0);
+  // (c) a duplicate alias inside one channel is refused.
+  await page.fill('#aliasNewName', 'alpha');
+  await page.fill('#aliasNewValue', 'dup-target');
+  await page.click('#btnAliasAdd');
+  await page.waitForTimeout(200);
+  await page.fill('#aliasNewName', 'beta');
+  await page.fill('#aliasNewValue', 'dup-target');
+  await page.click('#btnAliasAdd');
+  await page.waitForTimeout(300);
+  const r5rows = await page.$$eval('#aliasRows input', e => e.map(x => x.value));
+  check('R5 duplicate alias is refused', r5rows.filter(v => v === 'dup-target').length === 1, JSON.stringify(r5rows));
+  // (d) nothing that CPA would drop is ever sent: keep the channel valid and save.
+  patchLog = [];
+  await page.click('#btnAliasSave');
+  await page.waitForTimeout(1200);
+  const r5sent = patchLog.find(p => p.channel === 'dupchan');
+  check('R5 a valid channel still saves normally', !!r5sent && r5sent.aliases.length === 1, JSON.stringify(r5sent && r5sent.aliases));
+  // (e) a same-name row that somehow reaches the draft must be flagged before send.
+  await page.evaluate(() => {
+    // Simulate the edit-an-existing-row path, which the pre-flight must catch.
+    aliasDraft['dupchan'].push({ name: 'same', alias: 'same' });
+    aliasTouched();
+  });
+  await page.waitForTimeout(300);
+  const preflightShown = await page.evaluate(() => {
+    const before = window.confirm;
+    let seen = null;
+    window.confirm = msg => { seen = msg; return false; };
+    return saveAliases().then(() => { window.confirm = before; return seen; });
+  });
+  await page.waitForTimeout(600);
+  check('R5 pre-flight names the rows CPA would drop',
+    !!preflightShown && preflightShown.includes('丢弃') && preflightShown.includes('same'),
+    JSON.stringify(preflightShown));
+  // Clean up the channel this test created.
+  await page.evaluate(async () => {
+    window.confirm = () => true;
+    aliasDraft['dupchan'] = [];
+    aliasTouched();
+    await saveAliases();
+  });
+  await page.waitForTimeout(1200);
 
   check('no uncaught page errors', errors.length === 0, errors.join(' | '));
 

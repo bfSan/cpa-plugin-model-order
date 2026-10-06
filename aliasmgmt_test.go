@@ -342,3 +342,54 @@ func TestAliasEditorRendersNewChannelsWithoutThrowing(t *testing.T) {
 		t.Errorf("bare renderAlias() call sites = %d, want exactly 1 (inside renderAliasSafely)", bare)
 	}
 }
+
+// CPA silently drops alias rows; the panel must say so before it loses them.
+//
+// Symptom: filling 上游模型名 = 对外别名 (name=gpt-6.1-sol / alias=gpt-6.1-sol,
+// i.e. the same string on both sides) and pressing save answered
+//
+//	404 {"error":"channel not found"}
+//
+// which reads like "that channel name does not exist" and sent the investigation
+// after channel-name validation for a long time. The real cause is in CPA:
+// SanitizeOAuthModelAlias() (internal/config/config_normalization.go, identical
+// in v7.3.7 and v8.0.16) runs on every alias read AND write and drops
+//
+//	§1 a row whose name or alias is empty
+//	§2 strings.EqualFold(name, alias) — the same name on both sides
+//	§3 a duplicate alias within the channel (first wins)
+//	§4 the whole channel, once §1-§3 leave it empty
+//
+// §2 is why name==alias can never do anything: it is not a "register this id"
+// primitive, it is a no-op row. §4 then empties the channel, and PATCH's
+// len(normalized)==0 branch reports the missing channel as 404. The loss is
+// otherwise silent: PATCH returns 200 and simply stores fewer rows, so a mixed
+// submit ([a→a, b→zz-b]) looks like it worked while only b→zz-b survives.
+//
+// The panel cannot make CPA accept these rows, so the fix is to stop hiding the
+// rule: reject same-name rows at input time, list every row CPA will drop before
+// sending anything, and diff the row count after saving.
+func TestAliasEditorExplainsDroppedRowsInsteadOfLosingThem(t *testing.T) {
+	html := renderPanel()
+	for _, needle := range []string{
+		"aliasDroppedRows",
+		"aliasDroppedSummary",
+		// The pre-flight must name the rows and explain the 404 they would cause.
+		"CPA 会按规则丢弃",
+		"channel not found",
+		// Post-save diff, the only place §3 (duplicate alias) becomes visible.
+		"有行未写入",
+	} {
+		if !strings.Contains(html, needle) {
+			t.Errorf("panel is missing %q, which is how dropped rows are surfaced", needle)
+		}
+	}
+	// Same-name rows are refused as they are typed, not just at save time.
+	if !strings.Contains(html, "上游模型名和对外别名不能相同") {
+		t.Error("addAliasRow must refuse a row whose name equals its alias")
+	}
+	// The comparison has to be case-insensitive, because CPA's is.
+	if !strings.Contains(html, "name.toLowerCase() === alias.toLowerCase()") {
+		t.Error("the same-name check must match CPA's EqualFold, i.e. be case-insensitive")
+	}
+}
