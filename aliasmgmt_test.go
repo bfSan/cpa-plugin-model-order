@@ -244,3 +244,101 @@ access:
 }
 
 var _ = pluginapi.ManagementRequest{}
+
+// --- regressions from the live deployment (2026-10-06) ---------------------
+//
+// Three defects were reported against this panel. Each is pinned here at the
+// source level so a plain `go test` catches a regression without a browser; the
+// playwright suite (scripts/alias-editor-test.js) covers the same ground
+// behaviourally. The comments record the user-visible symptom, because that is
+// what a future reader will be matching against a bug report.
+
+// Bug 3: saving must not strip row fields other than name/alias.
+//
+// Symptom: "我之前新增一个上游不存在的模型名，过一会又消失了" and, worse, every
+// alias in the channel silently losing force-mapping after any save. CPA stores
+// force-mapping:true on each row; an editor that rebuilt rows as {name, alias}
+// dropped it, and because PATCH replaces the whole channel the loss was written
+// straight to config.yaml. Measured effect of losing it: qoder-deepseek-v4.1-flash
+// immediately answered 503 auth_unavailable while qoder-auto still worked.
+func TestAliasEditorPreservesNonEditableRowFields(t *testing.T) {
+	html := renderPanel()
+	// Rows are cloned wholesale, never rebuilt from two fields.
+	for _, needle := range []string{
+		"cloneAliasRow",
+		"cloneAliasTable",
+		"ALIAS_EDITABLE_KEYS",
+		"aliasPayloadRows",
+	} {
+		if !strings.Contains(html, needle) {
+			t.Errorf("panel is missing %q, which is how non-editable row fields survive a save", needle)
+		}
+	}
+	// The exact shape that dropped force-mapping must be gone from the write path.
+	if strings.Contains(html, "aliases: aliasDraft[ch].map(r => ({ name: r.name, alias: r.alias }))") {
+		t.Error("the save path rebuilds rows as {name, alias}, which strips force-mapping")
+	}
+	// And the comparison must look at whole rows, or a field-only change is
+	// invisible and the save can be skipped or mis-scoped.
+	if !strings.Contains(html, "normalizeAliasRowForCompare") {
+		t.Error("dirty checking must compare whole rows, not just name+alias")
+	}
+}
+
+// Bug 1: an empty channel must never be sent as an empty PATCH.
+//
+// Symptom: "插件自定义新增渠道没用，提示渠道不存在". CPA answers an empty aliases
+// array with 404 {"error":"channel not found"} — it has no representation for a
+// nameless channel, so creating one and saving immediately always failed with a
+// message that reads like the channel does not exist (it does not, yet).
+func TestAliasEditorNeverPatchesAnEmptyChannel(t *testing.T) {
+	html := renderPanel()
+	for _, needle := range []string{
+		"aliasEmptyChannels",
+		"deleteAliasChannel",
+	} {
+		if !strings.Contains(html, needle) {
+			t.Errorf("panel is missing %q, which is how empty channels are handled", needle)
+		}
+	}
+	// DELETE is the only accepted way to retire a channel, so the editor needs it.
+	if !strings.Contains(html, `method: "DELETE"`) {
+		t.Error("the panel must DELETE a channel it empties; CPA rejects an empty PATCH")
+	}
+	// The guard has to sit on the write loop itself: collecting the empty set
+	// without filtering the PATCH loop would still send the losing request.
+	if !strings.Contains(html, "for (const ch of writable)") {
+		t.Error("the PATCH loop must run over the non-empty channels only")
+	}
+}
+
+// Bug 2: a newly created channel must render, not throw.
+//
+// Symptom: "自定义渠道之后，点击添加，列表页面不会实时展示". newChannel() writes
+// only aliasDraft, so aliasTable[newChannel] was undefined and the row loop's
+// .find() on it threw TypeError. The throw aborted renderAlias mid-DOM-build:
+// the table stayed empty and — because nothing caught it — no error was shown
+// at all. Verified against the pre-fix page in a real browser: the error is
+// "TypeError: Cannot read properties of undefined (reading 'find')".
+func TestAliasEditorRendersNewChannelsWithoutThrowing(t *testing.T) {
+	html := renderPanel()
+	// The baseline for a channel that does not exist on the wire yet is a safe
+	// empty list, so the row loop can always run.
+	if strings.Contains(html, "aliasTable[aliasChannel].find(") {
+		t.Error("renderAlias indexes aliasTable[aliasChannel] directly; a new channel is undefined there")
+	}
+	if !strings.Contains(html, "const baselineRows = (aliasTable && aliasTable[aliasChannel]) || [];") {
+		t.Error("renderAlias must default the baseline to an empty list")
+	}
+	// Belt and braces: rendering is wrapped so a future throw becomes a visible
+	// message instead of a silent no-op.
+	if !strings.Contains(html, "renderAliasSafely") {
+		t.Error("renderAlias must be called through a wrapper that surfaces failures")
+	}
+	// Every call site goes through the wrapper (the definition and the wrapper's
+	// own internal call are the only bare references allowed).
+	bare := strings.Count(html, "renderAlias();")
+	if bare != 1 {
+		t.Errorf("bare renderAlias() call sites = %d, want exactly 1 (inside renderAliasSafely)", bare)
+	}
+}

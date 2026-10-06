@@ -604,14 +604,36 @@ function move(delta){
 // /v0/management/oauth-model-alias，用的是操作者本来就有的管理密钥；宿主没有
 // “写任意 CPA 配置”的 RPC，所以这条路径是唯一可行的。
 //
-// 数据模型刻意保持成 CPA 的原样：一张 channel -> [{name, alias}] 的表。中间
-// 任何地方都不做形状转换，因为 CPA 的 PATCH 是【按 channel 整体替换】而非合并，
-// 一旦本地表示和线上表示不完全一致，覆盖写就会静默丢掉没看见的条目。
+// 数据模型刻意保持成 CPA 的原样：一张 channel -> [{name, alias, ...}] 的表。
+// 中间任何地方都不做形状转换，因为 CPA 的 PATCH 是【按 channel 整体替换】而非
+// 合并，一旦本地表示和线上表示不完全一致，覆盖写就会静默丢掉没看见的条目。
+//
+// ★ 行里除 name/alias 之外的字段（force-mapping、display-name、fork …）必须原样
+// 保留。CPA 的 alias 行带 force-mapping:true 才是强制改名；面板早期版本只留
+// name/alias 两个字面量，读取时丢字段、保存时整体覆盖，于是点一次「保存到 CPA」
+// 就把该渠道所有行的 force-mapping 抹掉，别名随之失效——用户看到的就是「我加的
+// 别名过一会儿没了」。修复方式是把整行原样带过去，编辑只覆盖被改的那两个字段。
+// 判据（本机实测）：PATCH 后 config.yaml 里 force-mapping 计数应为满值；剥掉后
+// qoder-deepseek-v4.1-flash 立刻变 503 auth_unavailable。
 const ALIAS_PATH = MANAGEMENT_BASE_PATH + "/oauth-model-alias";
+
+// ALIAS_EDITABLE_KEYS 是面板允许编辑的字段。其余字段一律透传，绝不丢弃。
+const ALIAS_EDITABLE_KEYS = ["name", "alias"];
+
+// cloneAliasRow 深拷贝一行，保留全部字段。JSON 往返是为了让 draft 与 table 彻底
+// 解耦，同时天然保真（CPA 的 alias 行只有字符串/布尔值，没有需要特殊处理的类型）。
+function cloneAliasRow(row){
+  return JSON.parse(JSON.stringify(row));
+}
+
+// cloneAliasTable 深拷贝整张 channel -> rows 的表。
+function cloneAliasTable(table){
+  return JSON.parse(JSON.stringify(table || {}));
+}
 
 // table 是加载到的线上内容（只读基线），draft 是编辑中的副本。只有 draft 与
 // table 有差异的 channel 才会被写回去，没碰过的渠道一个字节都不动。
-let aliasTable = null;      // {channel: [{name, alias}]}，未加载时为 null
+let aliasTable = null;      // {channel: [row]}，未加载时为 null
 let aliasDraft = null;      // 同上，编辑中
 let aliasDirtyChannels = new Set();
 let aliasChannel = "";     // 当前显示的 channel
@@ -631,17 +653,24 @@ async function loadAliases(){
     aliasTable = {};
     Object.keys(body).forEach(ch => {
       const rows = Array.isArray(body[ch]) ? body[ch] : [];
+      // 整行原样拷贝，只把 name/alias 规范成字符串。force-mapping 之类的字段
+      // 必须活到保存那一刻，否则整体覆盖写会把它们抹掉。
       aliasTable[ch] = rows
         .filter(r => r && typeof r === "object")
-        .map(r => ({ name: String(r.name == null ? "" : r.name), alias: String(r.alias == null ? "" : r.alias) }));
+        .map(r => {
+          const copy = cloneAliasRow(r);
+          copy.name = String(r.name == null ? "" : r.name);
+          copy.alias = String(r.alias == null ? "" : r.alias);
+          return copy;
+        });
     });
-    aliasDraft = JSON.parse(JSON.stringify(aliasTable));
+    aliasDraft = cloneAliasTable(aliasTable);
     aliasDirtyChannels = new Set();
     if (!Object.prototype.hasOwnProperty.call(aliasDraft, aliasChannel)) {
       aliasChannel = Object.keys(aliasDraft).sort()[0] || "";
     }
     $("aliasHint").textContent = "";
-    renderAlias();
+    renderAliasSafely();
     const total = Object.keys(aliasDraft).reduce((n, ch) => n + aliasDraft[ch].length, 0);
     toast("ok", "已读取 " + Object.keys(aliasDraft).length + " 个渠道，共 " + total + " 条别名");
   } catch (e) { toast("err", "读取失败: " + e.message); }
@@ -649,20 +678,58 @@ async function loadAliases(){
 }
 
 // aliasIsDirty 逐行比较而不只看长度，所以「改了个别名值」也算改动。
-// 比较前排序，因为 CPA 返回的顺序不保证稳定，而行顺序对 CPA 无意义。
+// 比较前排序并序列化整行：CPA 返回的顺序不保证稳定，而行顺序对 CPA 无意义；
+// 比较整行而不是 name+alias，是为了让任何字段差异（含被误删的 force-mapping）
+// 都算作脏，从而不会被悄悄漏掉。
 function aliasIsDirty(ch){
   const before = (aliasTable && aliasTable[ch]) || [];
   const after = (aliasDraft && aliasDraft[ch]) || [];
   if (before.length !== after.length) return true;
-  const line = r => r.name + "" + r.alias;
-  return before.map(line).sort().join("") !== after.map(line).sort().join("");
+  const line = r => JSON.stringify(normalizeAliasRowForCompare(r));
+  return before.map(line).sort().join("\n") !== after.map(line).sort().join("\n");
+}
+
+// normalizeAliasRowForCompare 把一行折叠成可比较的规范形式：键名排序，并把
+// undefined/null 归一成空串（输入框回读空值会变成空串，而线上可能是缺字段，
+// 两者语义相同，不该被当成改动）。
+function normalizeAliasRowForCompare(row){
+  const out = {};
+  Object.keys(row || {}).sort().forEach(k => {
+    const v = row[k];
+    out[k] = v === undefined || v === null ? "" : v;
+  });
+  return out;
 }
 
 function aliasTouched(){
   if (!aliasDraft) return;
   const chans = new Set(Object.keys(aliasDraft).concat(Object.keys(aliasTable || {})));
   aliasDirtyChannels = new Set([...chans].filter(aliasIsDirty));
-  renderAlias();
+  renderAliasSafely();
+}
+
+// renderAliasSafely 包一层，保证渲染异常不会静默吞掉整块 UI。
+// 早期版本没有这层保护：新建渠道后 renderAlias 内部抛 TypeError，界面既不
+// 刷新也不报错，用户只看到「点了没反应」。现在任何异常都会变成可见的提示，
+// 同时把编辑器恢复成一个可用的空状态，而不是留下半截 DOM。
+function renderAliasSafely(){
+  try {
+    renderAlias();
+  } catch (e) {
+    console.error("renderAlias failed:", e);
+    toast("err", "别名表格渲染出错: " + (e && e.message ? e.message : e));
+    const body = $("aliasRows");
+    if (body) {
+      body.innerHTML = "";
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 3;
+      td.className = "empty";
+      td.textContent = "渲染出错，已停止。请点“从 CPA 读取”重新加载。";
+      tr.appendChild(td);
+      body.appendChild(tr);
+    }
+  }
 }
 
 function aliasTotalRows(){
@@ -700,9 +767,9 @@ function renderAlias(){
     const count = document.createElement("span");
     count.className = "chan-count";
     // 带 * 表示保存后这个渠道会和线上不一样。
-    count.textContent = aliasDraft[ch].length + (dirty ? " *" : "");
+    count.textContent = (aliasDraft[ch] || []).length + (dirty ? " *" : "");
     tab.appendChild(count);
-    tab.addEventListener("click", () => { aliasChannel = ch; renderAlias(); });
+    tab.addEventListener("click", () => { aliasChannel = ch; renderAliasSafely(); });
     picker.appendChild(tab);
   });
   // 渠道本身就是 CPA 表的 key，必须能新建，否则新增的别名无处安放。
@@ -712,7 +779,13 @@ function renderAlias(){
   addTab.addEventListener("click", newChannel);
   picker.appendChild(addTab);
 
-  const rows = aliasDraft[aliasChannel].slice().sort((a, b) => a.name.localeCompare(b.name));
+  // ★ 这里曾经是崩溃点：新建渠道只写 aliasDraft，不写 aliasTable，于是
+  // aliasTable[新渠道] 是 undefined，下面 .find() 抛 TypeError 并把整个
+  // renderAlias 打断——表现就是「新增渠道后列表不刷新、点了没反应」。
+  // 基线缺失等价于「这个渠道线上还不存在」，取空数组即可。
+  const draftRows = (aliasDraft && aliasDraft[aliasChannel]) || [];
+  const baselineRows = (aliasTable && aliasTable[aliasChannel]) || [];
+  const rows = draftRows.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
   $("aliasCnt").textContent = rows.length + " 条 / 共 " + aliasTotalRows() + " 条";
   $("btnAliasSave").disabled = aliasDirtyChannels.size === 0;
   $("btnAliasRevert").disabled = aliasDirtyChannels.size === 0;
@@ -725,13 +798,17 @@ function renderAlias(){
     const td = document.createElement("td");
     td.colSpan = 3;
     td.className = "empty";
-    td.textContent = "这个渠道还没有别名，用上面的输入框添加。";
+    // 空渠道是 CPA 拒绝的形状（PATCH 空 aliases 一律 404 channel not found），
+    // 所以文案必须说清「先加一条」而不是让用户点保存去撞墙。
+    td.textContent = baselineRows.length
+      ? "这个渠道的别名已全部删除：保存将把该渠道整体删除（CPA 不接受空渠道）。"
+      : "这个渠道还没有别名，用上面的输入框添加——CPA 不接受空渠道，至少加一条才能保存。";
     tr.appendChild(td);
     body.appendChild(tr);
   }
   rows.forEach(row => {
     const tr = document.createElement("tr");
-    const base = aliasTable[aliasChannel].find(r => r.name === row.name);
+    const base = baselineRows.find(r => r.name === row.name);
     // 新增行和改过值的行都标绿，这样保存前能一眼看清将要写入什么。
     if (!base || base.alias !== row.alias) tr.className = "added";
 
@@ -775,9 +852,19 @@ function newChannel(){
     toast("err", "渠道 " + ch + " 已存在");
     return;
   }
+  // 只接受规范化后仍是合法渠道名的输入：CPA 以渠道名做配置键，空白、大小写
+  // 混写或奇怪字符只会换来一个 404/400，还不如在本地就说清楚。
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(ch)) {
+    toast("err", "渠道名只能用小写字母、数字、点、下划线和连字符");
+    return;
+  }
   aliasDraft[ch] = [];
   aliasChannel = ch;
   aliasTouched();
+  // 新建的渠道在线上还不存在，而 CPA 拒绝空渠道（PATCH 空 aliases 一律
+  // 404 channel not found），所以直接把人引到输入框，别让他先点保存去撞墙。
+  toast("ok", "已新建渠道 " + ch + "，请至少添加一条别名再保存");
+  $("aliasNewName").focus();
 }
 
 function addAliasRow(){
@@ -791,6 +878,8 @@ function addAliasRow(){
     toast("err", "该渠道已有同名条目，请直接改那一行");
     return;
   }
+  // 新行只有两个可见字段；不要凭空写 force-mapping。是否强制改名是 CPA 配置
+  // 的语义，面板不替操作者决定，也不去猜。
   list.push({ name: name, alias: value });
   $("aliasNewName").value = "";
   $("aliasNewValue").value = "";
@@ -798,28 +887,73 @@ function addAliasRow(){
   aliasTouched();
 }
 
+// aliasPayloadRows 把一行的可编辑字段覆盖到原行上，并原样保留其余字段。
+// ★ 这是 force-mapping 得以存活的关键：早期版本在这里重建
+// {name, alias} 两个字面量，于是整体覆盖写把每行的其他字段全抹掉。
+function aliasPayloadRows(ch){
+  return ((aliasDraft && aliasDraft[ch]) || []).map(row => {
+    const out = cloneAliasRow(row);
+    ALIAS_EDITABLE_KEYS.forEach(k => { out[k] = row[k]; });
+    return out;
+  });
+}
+
+// aliasEmptyChannels / aliasDeletableChannels 把「空渠道」单独挑出来。
+// CPA 对空 aliases 的 PATCH 返回 404 channel not found，而不是「删除」，
+// 所以空渠道不能走 PATCH：线上已存在的空渠道要提示改用删除，线上不存在的
+// 就直接跳过。这个区分正是「新建渠道提示渠道不存在」的根因。
+function aliasEmptyChannels(targets){
+  return targets.filter(ch => ((aliasDraft && aliasDraft[ch]) || []).length === 0);
+}
+
+// deleteAliasChannel 走 CPA 的 DELETE，用于把线上已存在的渠道整个删掉。
+async function deleteAliasChannel(ch){
+  await call(ALIAS_PATH + "?channel=" + encodeURIComponent(ch), { method: "DELETE" });
+}
+
 async function saveAliases(){
   if (!aliasDraft || aliasDirtyChannels.size === 0) return;
   const targets = [...aliasDirtyChannels].sort();
-  const summary = targets.map(ch => ch + "：" + aliasDraft[ch].length + " 条").join("\n");
-  if (!confirm("将把这些渠道整体覆盖到 CPA：\n\n" + summary + "\n\n其余渠道不会被触碰。继续？")) return;
+  const emptyOnWire = aliasEmptyChannels(targets).filter(ch => (aliasTable && aliasTable[ch]) || []);
+  const skipNew = aliasEmptyChannels(targets).filter(ch => !((aliasTable && aliasTable[ch]) || []));
+  const writable = targets.filter(ch => !aliasEmptyChannels(targets).includes(ch));
+
+  // 预览要如实说清每个渠道会发生什么，包括空渠道的两种处置。
+  const lines = targets.map(ch => {
+    const n = ((aliasDraft && aliasDraft[ch]) || []).length;
+    if (n > 0) return ch + "：" + n + " 条";
+    if (((aliasTable && aliasTable[ch]) || []).length) return ch + "：空 → 删除该渠道";
+    return ch + "：空（尚未存在，将跳过）";
+  });
+  if (writable.length === 0 && emptyOnWire.length === 0) {
+    toast("err", "这些渠道都是空的。CPA 不接受空渠道，请至少添加一条别名");
+    return;
+  }
+  if (!confirm("将写入 CPA：\n\n" + lines.join("\n") + "\n\n其余渠道不会被触碰。继续？")) return;
+
   const button = $("btnAliasSave");
   button.disabled = true;
   try {
     // 逐渠道 PATCH。body 必须是 {"channel":X,"aliases":[...]}：直接传
     // {channel:[...]} 会被 CPA 拒绝并返回 {"error":"invalid channel"}。
-    // PATCH 替换整个 channel，所以这里发的是该渠道的完整列表。
-    for (const ch of targets) {
+    // PATCH 替换整个 channel，所以这里发的是该渠道的完整列表——包括每行
+    // name/alias 之外的字段（force-mapping 等）。
+    for (const ch of writable) {
       await call(ALIAS_PATH, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          channel: ch,
-          aliases: aliasDraft[ch].map(r => ({ name: r.name, alias: r.alias }))
-        })
+        body: JSON.stringify({ channel: ch, aliases: aliasPayloadRows(ch) })
       });
     }
-    toast("ok", "已写入 " + targets.length + " 个渠道，约 12 秒后热生效");
+    // 空渠道在线上存在=删除请求；这是 CPA 唯一接受的方式。
+    for (const ch of emptyOnWire) {
+      await deleteAliasChannel(ch);
+    }
+    const done = [];
+    if (writable.length) done.push("写入 " + writable.length + " 个渠道");
+    if (emptyOnWire.length) done.push("删除 " + emptyOnWire.length + " 个渠道");
+    if (skipNew.length) done.push("跳过 " + skipNew.length + " 个空渠道");
+    toast("ok", done.join("，") + "；约 12 秒后热生效");
     // 重新读一次而不是就地改基线：让界面显示的永远是 CPA 真正存下来的东西。
     await loadAliases();
   } catch (e) { toast("err", "保存失败: " + e.message); }
@@ -829,9 +963,9 @@ async function saveAliases(){
 function revertAliases(){
   if (!aliasDraft || aliasDirtyChannels.size === 0) return;
   if (!confirm("放弃未保存的改动？")) return;
-  aliasDraft = JSON.parse(JSON.stringify(aliasTable));
+  aliasDraft = cloneAliasTable(aliasTable);
   aliasDirtyChannels = new Set();
-  renderAlias();
+  renderAliasSafely();
   toast("ok", "已恢复到上次读取的内容");
 }
 

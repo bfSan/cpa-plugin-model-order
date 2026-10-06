@@ -37,15 +37,22 @@ const API = '/v0/management/plugins/model-registry';
 const MGMT_KEY = 'test-key';
 
 // The table as CPA currently holds it in this deployment.
+// Rows carry force-mapping, exactly as the live table does: losing it is the
+// regression this suite exists to catch (it turned qoder-deepseek-v4.1-flash
+// into a 503 the first time a save went through an editor that dropped it).
 const INITIAL = {
-  'qoder': [{ name: 'auto', alias: 'qoder-auto' }, { name: 'fast', alias: 'qoder-fast' }],
-  'workbuddy': [{ name: 'space-bunny', alias: 'workbuddy-space-bunny' }],
+  'qoder': [
+    { name: 'auto', alias: 'qoder-auto', 'force-mapping': true },
+    { name: 'fast', alias: 'qoder-fast', 'force-mapping': true },
+  ],
+  'workbuddy': [{ name: 'space-bunny', alias: 'workbuddy-space-bunny', 'force-mapping': true }],
 };
 
 let table = null;      // what the stub "serves"
 let patchLog = [];     // every PATCH body the page sent
+let deleteLog = [];    // every DELETE the page sent
 
-function reset() { table = JSON.parse(JSON.stringify(INITIAL)); patchLog = []; }
+function reset() { table = JSON.parse(JSON.stringify(INITIAL)); patchLog = []; deleteLog = []; }
 
 function bodyJson(req) {
   return new Promise(resolve => {
@@ -77,12 +84,33 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'PATCH') {
       const b = await bodyJson(req);
       patchLog.push(b);
-      // Mirror CPA: PATCH replaces the whole channel.
-      if (!b || typeof b.channel !== 'string') {
+      // Mirror CPA exactly:
+      //   * a body that is not {channel, aliases} -> 400 invalid channel
+      //   * an EMPTY aliases array -> 404 channel not found, and NOTHING is
+      //     stored. This is the behaviour that produced the user-visible
+      //     "渠道不存在" when saving a freshly created, still-empty channel.
+      //     The previous stub happily stored [] and so never caught it.
+      if (!b || typeof b.channel !== 'string' || !Array.isArray(b.aliases)) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'invalid channel' }));
       }
-      table[b.channel] = b.aliases || [];
+      if (b.aliases.length === 0) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'channel not found' }));
+      }
+      // PATCH replaces the whole channel, row fields included.
+      table[b.channel] = b.aliases;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ status: 'ok' }));
+    }
+    if (req.method === 'DELETE') {
+      const ch = url.searchParams.get('channel');
+      deleteLog.push(ch);
+      if (!Object.prototype.hasOwnProperty.call(table, ch)) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'channel not found' }));
+      }
+      delete table[ch];
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ status: 'ok' }));
     }
@@ -111,6 +139,11 @@ function check(name, ok, extra) {
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
+  // One global dialog handler for the whole run: confirm() prompts from save /
+  // revert are accepted, prompt() is answered by the page-side override where a
+  // test needs a specific channel name. Handlers installed per click raced with
+  // dialogs opened by earlier actions, so there is exactly one.
+  page.on('dialog', d => d.accept());
   await page.goto(`http://127.0.0.1:${port}/panel`);
   // The panel gates on a management key held in sessionStorage, and it also
   // accepts one via ?key= which it then moves into sessionStorage itself.
@@ -144,7 +177,6 @@ function check(name, ok, extra) {
   check('only the edited channel is dirty', dirtyTabs.length === 1 && dirtyTabs[0] === 'workbuddy', JSON.stringify(dirtyTabs));
 
   // 3. saving sends the channel's FULL list and nothing else
-  page.once('dialog', d => d.accept());
   await page.click('#btnAliasSave');
   await page.waitForFunction(() => document.querySelectorAll('.chan-tab').length > 0 && document.getElementById('btnAliasSave').disabled, null, { timeout: 8000 });
   check('exactly one PATCH was sent', patchLog.length === 1, JSON.stringify(patchLog));
@@ -161,7 +193,6 @@ function check(name, ok, extra) {
   const qinputs = await page.$$('#aliasRows input');
   await qinputs[0].fill('changed-upstream');
   await page.waitForFunction(() => !document.getElementById('btnAliasSave').disabled);
-  page.once('dialog', d => d.accept());
   await page.click('#btnAliasRevert');
   await page.waitForFunction(() => document.getElementById('btnAliasSave').disabled, null, { timeout: 5000 });
   const reverted = await page.$$eval('#aliasRows input', els => els.map(e => e.value));
@@ -187,6 +218,92 @@ function check(name, ok, extra) {
   await page.click('#aliasRows tr:first-child button.mini');
   await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length === 0, null, { timeout: 5000 });
   check('deleting the only row empties the channel', (await page.$$('#aliasRows input')).length === 0);
+
+  // ---- regressions reported from the live deployment -------------------
+  // Everything below was a real defect; each check names the symptom the
+  // operator saw, so a future failure maps straight back to a bug report.
+
+  // R1 (Bug 3): saving must not strip force-mapping.
+  // Symptom: "保存一次之后别名就失效 / 我加的模型名过一会儿没了".
+  // Re-load first so the dirty set starts clean after the edits above.
+  await page.click('#btnAliasLoad');
+  await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length > 0, null, { timeout: 8000 });
+  patchLog = [];
+  // Edit one alias value on qoder (alphabetically first channel), then save.
+  await page.click('#aliasChannels .chan-tab:nth-child(1)'); // qoder
+  await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length === 4);
+  const r1inputs = await page.$$('#aliasRows input');
+  await r1inputs[1].fill('qoder-auto-renamed');
+  await page.waitForFunction(() => !document.getElementById('btnAliasSave').disabled);
+  await page.click('#btnAliasSave');
+  // patchLog lives in Node, not in the page, so poll it from here: wait until
+  // the save either landed in the log or the button came back disabled.
+  for (let i = 0; i < 80 && patchLog.length === 0; i++) await page.waitForTimeout(100);
+  await page.waitForTimeout(400);
+  const r1sent = patchLog.find(p => p.channel === 'qoder');
+  check('R1 PATCH sent the whole qoder channel', !!r1sent && r1sent.aliases.length === 2, JSON.stringify(r1sent && r1sent.aliases));
+  check('R1 force-mapping survived the save',
+    !!r1sent && r1sent.aliases.every(a => a['force-mapping'] === true),
+    JSON.stringify(r1sent && r1sent.aliases));
+  check('R1 the stub still holds force-mapping',
+    table['qoder'].every(a => a['force-mapping'] === true), JSON.stringify(table['qoder']));
+  check('R1 the edited value was actually written',
+    table['qoder'].some(a => a.alias === 'qoder-auto-renamed'), JSON.stringify(table['qoder']));
+
+  // R2 (Bug 2): a brand-new channel must render immediately instead of
+  // throwing mid-render. Symptom: "自定义新增渠道，点添加，列表不实时展示".
+  await page.click('#btnAliasLoad');
+  await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length > 0, null, { timeout: 8000 });
+  const errsBefore = errors.length;
+  // newChannel() uses prompt(); answer it from the page side so no dialog
+  // handler is needed at all (a stray page.once('dialog') would race the
+  // confirm() dialogs below).
+  await page.evaluate(() => { window.prompt = () => 'brandnew'; });
+  await page.click('#aliasChannels .chan-tab:last-child'); // "+ 渠道"
+  await page.waitForFunction(() => {
+    const t = [...document.querySelectorAll('.chan-tab')].map(e => e.childNodes[0].textContent);
+    return t.includes('brandnew');
+  }, null, { timeout: 5000 });
+  check('R2 the new channel appears in the picker immediately', true);
+  check('R2 no uncaught error while rendering the new channel', errors.length === errsBefore, errors.slice(errsBefore).join(' | '));
+  // And it must be addable straight away (the old editor stopped rendering here).
+  await page.fill('#aliasNewName', 'space-bunny');
+  await page.fill('#aliasNewValue', 'brandnew-space-bunny');
+  await page.click('#btnAliasAdd');
+  await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length === 2, null, { timeout: 5000 });
+  check('R2 a row can be added to the new channel right away', true);
+
+  // R3 (Bug 1): saving a new channel that still has rows must work, and an
+  // empty channel must NOT be sent as an empty PATCH (CPA answers 404
+  // "channel not found" — the exact message the operator saw).
+  patchLog = [];
+  await page.click('#btnAliasSave');
+  await page.waitForTimeout(600);
+  const r3sent = patchLog.find(p => p.channel === 'brandnew');
+  check('R3 the new channel was PATCHed with its row', !!r3sent && r3sent.aliases.length === 1, JSON.stringify(r3sent && r3sent.aliases));
+  check('R3 no empty-aliases PATCH was ever sent',
+    patchLog.every(p => Array.isArray(p.aliases) && p.aliases.length > 0), JSON.stringify(patchLog));
+  check('R3 the stub accepted it (no 404 surfaced)', Object.prototype.hasOwnProperty.call(table, 'brandnew'), JSON.stringify(Object.keys(table)));
+
+  // R4: an emptied channel is deleted via DELETE, never PATCHed empty.
+  await page.click('#btnAliasLoad');
+  await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length > 0, null, { timeout: 8000 });
+  patchLog = []; deleteLog = [];
+  await page.evaluate(() => {
+    const tabs = [...document.querySelectorAll('.chan-tab')];
+    const t = tabs.find(e => e.childNodes[0].textContent === 'brandnew');
+    t.click();
+  });
+  await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length === 2);
+  await page.click('#aliasRows tr:first-child button.mini');
+  await page.waitForFunction(() => document.querySelectorAll('#aliasRows input').length === 0, null, { timeout: 5000 });
+  check('R4 emptied channel renders a delete-aware notice',
+    (await page.$eval('#aliasRows td.empty', e => e.textContent)).includes('删除'));
+  await page.click('#btnAliasSave');
+  await page.waitForTimeout(600);
+  check('R4 the emptied channel was DELETEd', deleteLog.includes('brandnew'), JSON.stringify(deleteLog));
+  check('R4 the emptied channel was not PATCHed empty',
+    patchLog.every(p => p.channel !== 'brandnew'), JSON.stringify(patchLog));
 
   check('no uncaught page errors', errors.length === 0, errors.join(' | '));
 
