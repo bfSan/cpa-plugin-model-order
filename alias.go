@@ -26,6 +26,21 @@ type aliasReport struct {
 	// panel can say which providers were considered at all. Empty means the
 	// caller supplied no channel list and the report fell back to the listing.
 	Channels []string `json:"channels,omitempty"`
+	// Skipped lists every captured model that produced no alias row, with the
+	// reason. A bare Ignored count cannot answer "why does this provider have no
+	// suggestions": cline's five visible models all carry a slash, so they are
+	// all dismissed as pass-through, and the count alone left no way to see that.
+	Skipped []skippedAliasRow `json:"skipped,omitempty"`
+	// SkippedByReason counts Skipped per reason, so the panel can summarise
+	// without walking the list.
+	SkippedByReason map[string]int `json:"skipped_by_reason,omitempty"`
+}
+
+// skippedAliasRow is one captured model that no alias row was proposed for.
+type skippedAliasRow struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model"`
+	Reason   string `json:"reason"`
 }
 
 // missingAliasRow is one model that reaches clients under a bare name, with the
@@ -54,6 +69,11 @@ const (
 	reasonNoProvider = "no provider"
 	// reasonAlreadyAliased marks an id that already carries the provider prefix.
 	reasonAlreadyAliased = "already aliased"
+	// reasonNoChannel marks a model whose provider has no oauth-model-alias
+	// channel at all, so there is nowhere to write a row.
+	reasonNoChannel = "provider has no alias channel"
+	// reasonNoModelName marks a listing row with an empty model id.
+	reasonNoModelName = "empty model name"
 )
 
 // buildAliasReport compares a captured listing against the alias table CPA
@@ -99,10 +119,22 @@ func buildAliasReport(port string, entries []catalogEntry, channels map[string]b
 // guessing a provider from the shape of a model name.
 func buildAliasReportWithProviders(port string, entries []catalogEntry, channels map[string]bool, modelProviders map[string][]string) aliasReport {
 	report := aliasReport{
-		Port:     port,
-		Captured: len(entries),
-		Missing:  []missingAliasRow{},
-		Channels: sortedKeys(channels),
+		Port:            port,
+		Captured:        len(entries),
+		Missing:         []missingAliasRow{},
+		Channels:        sortedKeys(channels),
+		Skipped:         []skippedAliasRow{},
+		SkippedByReason: map[string]int{},
+	}
+	// skip records why a captured model produced no row. It deliberately does not
+	// touch Ignored: that counter has always meant "models that produced no row",
+	// while Skipped is per (model, reason). One model can be skipped for two
+	// providers, so driving both from here would inflate the model count.
+	skip := func(provider, model, reason string) {
+		report.Skipped = append(report.Skipped, skippedAliasRow{
+			Provider: provider, Model: model, Reason: reason,
+		})
+		report.SkippedByReason[reason]++
 	}
 	// resolve attributes one entry to the providers that serve it. owned_by wins
 	// when present; otherwise the credential catalog supplies the providers,
@@ -155,6 +187,7 @@ func buildAliasReportWithProviders(port string, entries []catalogEntry, channels
 			// A row with no model name has no "name" field for the alias table to
 			// point at. Proposing "<provider>-" would add a nameless row.
 			report.Ignored++
+			skip("", id, reasonNoModelName)
 			continue
 		}
 		if looksLikeDirectPass(id) {
@@ -164,6 +197,7 @@ func buildAliasReportWithProviders(port string, entries []catalogEntry, channels
 			// treating them as such is the mistake that inflates the report from
 			// three rows to seven.
 			report.Ignored++
+			skip(entry.OwnedBy, id, reasonDirectPass)
 			continue
 		}
 		providers := resolve(entry)
@@ -171,15 +205,21 @@ func buildAliasReportWithProviders(port string, entries []catalogEntry, channels
 			// Neither owned_by nor the credential catalog knows who serves this,
 			// so there is no channel to write the row to.
 			report.Ignored++
+			skip("", id, reasonNoProvider)
 			continue
 		}
 		proposed := false
+		// recordedReason tracks whether a per-provider reason was already logged,
+		// so the no_channel fallback cannot double-count the same model.
+		recordedReason := false
 		for _, provider := range providers {
 			if !participates(provider) {
 				// openai and cline: no alias channel, and their names are intended.
 				continue
 			}
 			if strings.HasPrefix(id, providerPrefix(provider)) {
+				skip(provider, id, reasonAlreadyAliased)
+				recordedReason = true
 				continue
 			}
 			key := provider + "\x00" + id
@@ -197,7 +237,12 @@ func buildAliasReportWithProviders(port string, entries []catalogEntry, channels
 			proposed = true
 		}
 		if !proposed {
+			// This model produced no row: count it once, and if no more specific
+			// reason was recorded above, note that its providers have no channel.
 			report.Ignored++
+			if !recordedReason {
+				skip(strings.Join(providers, ","), id, reasonNoChannel)
+			}
 		}
 	}
 	sort.SliceStable(report.Missing, func(i, j int) bool {

@@ -1484,7 +1484,31 @@ async function showAliasSuggestions(){
     const missing = (report && report.missing) || [];
     const mine = missing.filter(m => !aliasChannel || m.channel === aliasChannel);
     if (!mine.length) {
+      // 空列表有两种情况，必须分开说：一种是真的一行都不缺，另一种是所有
+      // 模型都被判成"不需要别名"了。后者（cline 的五个可见模型全带斜杠，
+      // 全被判为 pass-through）此前只显示"没有缺失的别名"，看上去像没扫到，
+      // 而实际原因是判定逻辑主动跳过了它们。把跳过原因列出来，操作者才能判断
+      // 这是预期行为还是需要改判定。
       say(aliasChannel ? ("渠道 " + aliasChannel + " 没有缺失的别名。") : "没有缺失的别名。");
+      const byReason = (report && report.skipped_by_reason) || {};
+      const skipped = (report && report.skipped) || [];
+      const mineSkipped = skipped.filter(s => !aliasChannel || s.provider === aliasChannel);
+      const reasons = Object.keys(byReason);
+      if (reasons.length) {
+        say("本次捕获 " + (report.captured || 0) + " 个模型，其中 " + (report.ignored || 0) +
+            " 个未生成建议。跳过原因：" +
+            reasons.map(r => r + " × " + byReason[r]).join("；") + "。");
+      }
+      // 只列出当前渠道的明细，避免把别的 provider 的噪音堆在这里。
+      mineSkipped.slice(0, 40).forEach(sk => {
+        const li = document.createElement("li");
+        li.className = "empty";
+        li.textContent = "跳过 " + sk.model + "（" + (sk.provider || "未归属") + "）：" + sk.reason;
+        list.appendChild(li);
+      });
+      if (mineSkipped.length > 40) {
+        say("另有 " + (mineSkipped.length - 40) + " 条跳过记录未显示。");
+      }
       return;
     }
     mine.forEach(m => {
