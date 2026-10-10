@@ -49,8 +49,9 @@ const (
 	// reasonDirectPass marks a provider/model name such as cline's
 	// "anthropic/claude-opus-5.5".
 	reasonDirectPass = "provider/model pass-through"
-	// reasonNoProvider marks an entry with no usable owned_by.
-	reasonNoProvider = "no owned_by"
+	// reasonNoProvider marks an entry that neither owned_by nor the credential
+	// catalog can attribute to a provider.
+	reasonNoProvider = "no provider"
 	// reasonAlreadyAliased marks an id that already carries the provider prefix.
 	reasonAlreadyAliased = "already aliased"
 )
@@ -81,25 +82,58 @@ const (
 // judging from the listing, because reporting the openai models would be worse
 // than reporting a few extra rows.
 func buildAliasReport(port string, entries []catalogEntry, channels map[string]bool) aliasReport {
+	return buildAliasReportWithProviders(port, entries, channels, nil)
+}
+
+// buildAliasReportWithProviders is buildAliasReport plus a credential catalog.
+//
+// modelProviders maps a bare model id to the providers whose credentials serve
+// it, for entries the listing cannot attribute on its own. It is a fallback and
+// never an override: owned_by stays authoritative wherever it is set.
+//
+// trae is why this exists. All twenty of its models reach clients with an empty
+// owned_by, so the first check dropped them and no alias was proposed no matter
+// which channels the operator had added -- the report looked like it had nothing
+// to say about a provider that was plainly in use. The panel already reads the
+// credential catalogs, so it passes the mapping through rather than the plugin
+// guessing a provider from the shape of a model name.
+func buildAliasReportWithProviders(port string, entries []catalogEntry, channels map[string]bool, modelProviders map[string][]string) aliasReport {
 	report := aliasReport{
 		Port:     port,
 		Captured: len(entries),
 		Missing:  []missingAliasRow{},
 		Channels: sortedKeys(channels),
 	}
+	// resolve attributes one entry to the providers that serve it. owned_by wins
+	// when present; otherwise the credential catalog supplies the providers,
+	// which is the only way a provider that omits owned_by gets a row.
+	resolve := func(entry catalogEntry) []string {
+		if provider := strings.ToLower(strings.TrimSpace(entry.OwnedBy)); provider != "" {
+			return []string{provider}
+		}
+		out := make([]string, 0, 2)
+		for _, provider := range modelProviders[strings.TrimSpace(entry.ID)] {
+			if trimmed := strings.ToLower(strings.TrimSpace(provider)); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	}
+
 	// With no channel list the report still has to work, so fall back to reading
 	// adoption off the listing: a provider whose models mostly carry the
 	// <provider>- prefix is using the convention, and its bare names are the gap.
-	total := make(map[string]int, 4)
-	prefixed := make(map[string]int, 4)
+	// The tally follows the resolved provider, so a catalog-only provider is
+	// measured on the same footing as one that sets owned_by.
+	total := make(map[string]int, 8)
+	prefixed := make(map[string]int, 8)
 	for _, entry := range entries {
-		provider := strings.ToLower(strings.TrimSpace(entry.OwnedBy))
-		if provider == "" {
-			continue
-		}
-		total[provider]++
-		if strings.HasPrefix(strings.TrimSpace(entry.ID), providerPrefix(provider)) {
-			prefixed[provider]++
+		id := strings.TrimSpace(entry.ID)
+		for _, provider := range resolve(entry) {
+			total[provider]++
+			if strings.HasPrefix(id, providerPrefix(provider)) {
+				prefixed[provider]++
+			}
 		}
 	}
 	participates := func(provider string) bool {
@@ -112,23 +146,18 @@ func buildAliasReport(port string, entries []catalogEntry, channels map[string]b
 
 	// seen guards the report against a listing that repeats a model, which a
 	// multi channel deployment can produce when two providers expose the same
-	// upstream model.
+	// upstream model. It is keyed by channel as well, because one bare name
+	// served by two channels needs a row in each of them.
 	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
-		provider := strings.ToLower(strings.TrimSpace(entry.OwnedBy))
 		id := strings.TrimSpace(entry.ID)
-		switch {
-		case provider == "":
-			// owned_by is the only place the owning provider can come from on
-			// this listing shape, so without it there is no channel to write to.
-			report.Ignored++
-			continue
-		case id == "":
+		if id == "" {
 			// A row with no model name has no "name" field for the alias table to
 			// point at. Proposing "<provider>-" would add a nameless row.
 			report.Ignored++
 			continue
-		case looksLikeDirectPass(id):
+		}
+		if looksLikeDirectPass(id) {
 			// cline lists "anthropic/claude-opus-5.5": the provider already
 			// names it, and prefixing would give "cline-anthropic/claude-5.5".
 			// These are not missing aliases, and the plan document records that
@@ -136,26 +165,40 @@ func buildAliasReport(port string, entries []catalogEntry, channels map[string]b
 			// three rows to seven.
 			report.Ignored++
 			continue
-		case !participates(provider):
-			// openai and cline: no alias channel, and their names are intended.
-			report.Ignored++
-			continue
-		case strings.HasPrefix(id, providerPrefix(provider)):
+		}
+		providers := resolve(entry)
+		if len(providers) == 0 {
+			// Neither owned_by nor the credential catalog knows who serves this,
+			// so there is no channel to write the row to.
 			report.Ignored++
 			continue
 		}
-		if _, dup := seen[id]; dup {
-			report.Ignored++
-			continue
+		proposed := false
+		for _, provider := range providers {
+			if !participates(provider) {
+				// openai and cline: no alias channel, and their names are intended.
+				continue
+			}
+			if strings.HasPrefix(id, providerPrefix(provider)) {
+				continue
+			}
+			key := provider + "\x00" + id
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			report.Missing = append(report.Missing, missingAliasRow{
+				Provider: provider,
+				Model:    id,
+				Alias:    providerPrefix(provider) + id,
+				Reason:   reasonMissing,
+				Channel:  provider,
+			})
+			proposed = true
 		}
-		seen[id] = struct{}{}
-		report.Missing = append(report.Missing, missingAliasRow{
-			Provider: provider,
-			Model:    id,
-			Alias:    providerPrefix(provider) + id,
-			Reason:   reasonMissing,
-			Channel:  provider,
-		})
+		if !proposed {
+			report.Ignored++
+		}
 	}
 	sort.SliceStable(report.Missing, func(i, j int) bool {
 		if report.Missing[i].Channel != report.Missing[j].Channel {

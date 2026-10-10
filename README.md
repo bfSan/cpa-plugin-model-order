@@ -247,6 +247,35 @@ were real.
 separate reason: the provider already names them, and prefixing would propose
 `cline-anthropic/claude-opus-5.5`.
 
+#### Providers that omit `owned_by`
+
+The report attributes a model to a provider from `owned_by`, which is the only place a
+listing carries that information. Some providers leave it empty: trae reaches clients with
+an empty `owned_by` on all twenty of its models, so every one of them was dropped and the
+report said nothing about a provider that was plainly in use. Adding the channel made no
+difference — the entry never got as far as the channel check.
+
+The panel now reads the credential model catalogs (`/v0/management/auth-files`, plus each
+credential's `models`) and sends that mapping along as `model_providers`. The plugin cannot
+read those catalogs itself: the host exposes no RPC for them, and the panel already holds
+the management key. The mapping is a fallback and never an override, so `owned_by` still
+wins wherever it is set — which is what keeps CPA's built-in `openai` models from coming
+back as noise.
+
+A bare name served by two channels gets a row for each, because dedup keys on the channel
+as well as the id. `kimi-k3` is exactly this in the reference deployment: trae and workbuddy
+both serve it with an empty `owned_by`.
+
+Adding a channel is done from the providers that actually have credentials rather than by
+typing a name. Providers whose models already carry `owned_by` are marked `（可选）`: the
+report will never propose anything for them, so creating such a channel mostly yields an
+empty one that CPA then refuses to save.
+
+The suggestion list also flags a target alias another row already claims. CPA permits
+duplicate aliases, but two names pointing at one alias is not a behaviour worth reaching by
+accident: in the reference deployment `workbuddy-kimi-k3` already points at `kimi-k3-1`, so
+the row for `kimi-k3` is marked rather than offered.
+
 ### Testing the editor
 
 The Go suite renders the panel HTML but never runs it, so the editor's behaviour is covered

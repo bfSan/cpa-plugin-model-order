@@ -134,6 +134,15 @@ type aliasReportRequest struct {
 	// Empty is allowed and means "unknown": the report then judges from the
 	// listing instead.
 	Channels []string `json:"channels"`
+	// ModelProviders maps a bare model id to the providers whose credentials
+	// serve it, which the panel derives from the credential model catalogs.
+	//
+	// It exists because owned_by is not always set. trae reaches clients with an
+	// empty owned_by on all twenty of its models, so the report dropped every one
+	// of them and had nothing to say about a provider that was plainly in use.
+	// The plugin cannot read the credential catalogs itself -- the host exposes no
+	// RPC for them -- so the panel supplies the mapping.
+	ModelProviders map[string][]string `json:"model_providers"`
 }
 
 // handleAliasReport answers "which models are leaking under a bare name".
@@ -165,7 +174,7 @@ func handleAliasReport(body []byte) ([]byte, error) {
 	}
 	reports := make([]aliasReport, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		reports = append(reports, buildAliasReport(snapshot.Port, snapshot.Entries, channels))
+		reports = append(reports, buildAliasReportWithProviders(snapshot.Port, snapshot.Entries, channels, req.ModelProviders))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{"reports": reports}))
 }

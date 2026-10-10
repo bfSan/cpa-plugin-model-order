@@ -281,3 +281,109 @@ func TestSortedKeys(t *testing.T) {
 		t.Errorf("sortedKeys = %v, want [qoder workbuddy]", got)
 	}
 }
+
+// trae is the case this fallback exists for. Every one of its models reaches
+// clients with an empty owned_by -- measured on the live deployment -- so before
+// the credential catalog was supplied, the report dropped all twenty and said
+// nothing about a provider that was plainly in use.
+func TestAliasReportAttributesEntriesFromCredentialCatalog(t *testing.T) {
+	entries := []catalogEntry{
+		{ID: "Doubao-Seed-Evolving"},           // owned_by empty, catalog knows trae
+		{ID: "glm-5.3"},                        // owned_by empty, catalog knows trae
+		{ID: "hy3"},                            // owned_by empty, catalog knows workbuddy
+		{ID: "gpt-6.1-sol", OwnedBy: "openai"}, // owned_by wins
+	}
+	providers := map[string][]string{
+		"Doubao-Seed-Evolving": {"trae"},
+		"glm-5.3":              {"trae"},
+		"hy3":                  {"workbuddy"},
+		"gpt-6.1-sol":          {"trae"}, // must be ignored: owned_by is set
+	}
+	report := buildAliasReportWithProviders(portOpenAI, entries,
+		map[string]bool{"trae": true, "workbuddy": true}, providers)
+
+	want := []struct{ model, alias, channel string }{
+		{"Doubao-Seed-Evolving", "trae-Doubao-Seed-Evolving", "trae"},
+		{"glm-5.3", "trae-glm-5.3", "trae"},
+		{"hy3", "workbuddy-hy3", "workbuddy"},
+	}
+	if len(report.Missing) != len(want) {
+		t.Fatalf("missing = %d rows, want %d: %+v", len(report.Missing), len(want), report.Missing)
+	}
+	for i, expect := range want {
+		got := report.Missing[i]
+		if got.Model != expect.model || got.Alias != expect.alias || got.Channel != expect.channel {
+			t.Errorf("row %d = %s/%s/%s, want %s/%s/%s",
+				i, got.Channel, got.Model, got.Alias, expect.channel, expect.model, expect.alias)
+		}
+	}
+	// gpt-6.1-sol stays attributed to openai, which has no channel, so it is
+	// skipped rather than proposed for trae.
+	if report.Ignored != 1 {
+		t.Errorf("ignored = %d, want 1", report.Ignored)
+	}
+}
+
+// A provider that only the credential catalog knows still has to clear the
+// channel gate: a catalog entry is not by itself permission to invent an alias.
+func TestAliasReportCatalogProviderNeedsAChannel(t *testing.T) {
+	entries := []catalogEntry{{ID: "glm-5.3"}}
+	providers := map[string][]string{"glm-5.3": {"trae"}}
+	report := buildAliasReportWithProviders(portOpenAI, entries, map[string]bool{"workbuddy": true}, providers)
+	if len(report.Missing) != 0 {
+		t.Fatalf("missing = %+v, want none: trae has no channel", report.Missing)
+	}
+	if report.Ignored != 1 {
+		t.Errorf("ignored = %d, want 1", report.Ignored)
+	}
+}
+
+// One bare name served by two channels needs a row in each, so dedup has to key
+// on the channel as well as the id. kimi-k3 is exactly this on the live
+// deployment: trae and workbuddy both serve it with an empty owned_by.
+func TestAliasReportProposesOneRowPerServingChannel(t *testing.T) {
+	entries := []catalogEntry{{ID: "kimi-k3"}}
+	providers := map[string][]string{"kimi-k3": {"trae", "workbuddy"}}
+	report := buildAliasReportWithProviders(portOpenAI, entries,
+		map[string]bool{"trae": true, "workbuddy": true}, providers)
+	if len(report.Missing) != 2 {
+		t.Fatalf("missing = %d rows, want 2: %+v", len(report.Missing), report.Missing)
+	}
+	got := []string{report.Missing[0].Channel, report.Missing[1].Channel}
+	if got[0] != "trae" || got[1] != "workbuddy" {
+		t.Errorf("channels = %v, want [trae workbuddy]", got)
+	}
+	if report.Missing[0].Alias != "trae-kimi-k3" || report.Missing[1].Alias != "workbuddy-kimi-k3" {
+		t.Errorf("aliases = %q/%q, want trae-kimi-k3/workbuddy-kimi-k3",
+			report.Missing[0].Alias, report.Missing[1].Alias)
+	}
+}
+
+// The mapping is a fallback, not an override: without it behavior is unchanged,
+// which is what keeps the openai models from coming back as noise.
+func TestAliasReportWithoutCatalogMappingIsUnchanged(t *testing.T) {
+	entries := realCatalogEntries()
+	withFallback := buildAliasReportWithProviders(portOpenAI, entries, realChannels(), nil)
+	without := buildAliasReport(portOpenAI, entries, realChannels())
+	if len(withFallback.Missing) != len(without.Missing) {
+		t.Fatalf("nil mapping changed the report: %d vs %d rows",
+			len(withFallback.Missing), len(without.Missing))
+	}
+	if withFallback.Ignored != without.Ignored {
+		t.Errorf("ignored = %d with nil mapping, want %d", withFallback.Ignored, without.Ignored)
+	}
+}
+
+// An id the credential catalog does not know stays unattributed, so it is
+// skipped rather than guessed at.
+func TestAliasReportSkipsIDsAbsentFromTheCatalog(t *testing.T) {
+	entries := []catalogEntry{{ID: "mystery-model"}}
+	report := buildAliasReportWithProviders(portOpenAI, entries,
+		map[string]bool{"trae": true}, map[string][]string{"other": {"trae"}})
+	if len(report.Missing) != 0 {
+		t.Fatalf("missing = %+v, want none", report.Missing)
+	}
+	if report.Ignored != 1 {
+		t.Errorf("ignored = %d, want 1", report.Ignored)
+	}
+}

@@ -200,35 +200,6 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
     <button id="btnGen">按预览生成精确规则</button>
     <button class="primary" id="btnSave">保存并生效</button>
   </div>
-  <section class="card">
-    <h2>排序规则 order <span class="hint">从上到下匹配,先命中先入组;留空即不分组,全部字母序</span></h2>
-    <div class="bar">
-      <input type="text" class="grow" id="newPattern" placeholder="模型 ID 或通配,如 gpt-* / *-auto / *kimi*">
-      <button id="btnAdd">添加</button>
-      <button class="mini" id="btnTop" title="添加到最前面">置顶</button>
-    </div>
-    <div class="body"><ol class="rules" id="rules"></ol></div>
-    <div class="note">每条规则各成一桶,桶内按模型 ID 字母序。未命中任何规则的模型排在最后,同样按字母序。</div>
-  </section>
-
-  <section class="card">
-    <h2>CPA 实际下发的模型 <span class="hint" id="capHint"></span></h2>
-    <div class="bar">
-      <select id="port"></select>
-      <input type="search" class="grow" id="filter" placeholder="筛选模型 ID">
-      <span class="chip" id="cnt"></span>
-      <button id="btnRefreshModels" title="用下游 API Key 重新拉取 OpenAI 模型列表">刷新列表</button>
-      <button class="mini" id="btnChangeModelKey" title="更换用于刷新列表的下游 API Key">更换 Key</button>
-      <div class="key-gate" id="modelKeyGate">
-        <input type="password" class="grow" id="modelKeyInput" placeholder="下游 API Key" autocomplete="off">
-        <button class="mini" id="btnSaveModelKey">确定</button>
-        <button class="mini" id="btnCancelModelKey">取消</button>
-      </div>
-    </div>
-    <div class="body"><ul class="models" id="models"></ul></div>
-    <div class="note">这里列出的是各端口真实收到的 ID。Anthropic 端口是伪装名,想单独控制它就直接点右侧的“精确”,把伪装 ID 写成规则。</div>
-  </section>
-
   <section class="card" style="grid-column:1/-1">
     <h2>模型别名 <span class="hint">CPA 的 oauth-model-alias,只能精确匹配。这里可以任意增删改</span>
       <span class="spacer"></span><span class="chip" id="aliasCnt"></span></h2>
@@ -240,6 +211,7 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
     </div>
     <div class="body">
       <div class="chan-picker" id="aliasChannels"></div>
+      <div class="chan-picker key-gate" id="chanAdd"></div>
       <div class="bar" style="margin-top:10px">
         <input type="text" id="aliasNewName" placeholder="上游模型名，如 space-bunny" style="flex:1;min-width:180px">
         <span class="muted" style="font-size:12px">→</span>
@@ -260,7 +232,33 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
       <b>保存按渠道整体覆盖</b>,所以只会写「你打开后确实改过」的那些渠道,没碰的渠道一个字节都不动。
     </div>
   </section>
-
+  <section class="card">
+    <h2>排序规则 order <span class="hint">从上到下匹配,先命中先入组;留空即不分组,全部字母序</span></h2>
+    <div class="bar">
+      <input type="text" class="grow" id="newPattern" placeholder="模型 ID 或通配,如 gpt-* / *-auto / *kimi*">
+      <button id="btnAdd">添加</button>
+      <button class="mini" id="btnTop" title="添加到最前面">置顶</button>
+    </div>
+    <div class="body"><ol class="rules" id="rules"></ol></div>
+    <div class="note">每条规则各成一桶,桶内按模型 ID 字母序。未命中任何规则的模型排在最后,同样按字母序。</div>
+  </section>
+  <section class="card">
+    <h2>CPA 实际下发的模型 <span class="hint" id="capHint"></span></h2>
+    <div class="bar">
+      <select id="port"></select>
+      <input type="search" class="grow" id="filter" placeholder="筛选模型 ID">
+      <span class="chip" id="cnt"></span>
+      <button id="btnRefreshModels" title="用下游 API Key 重新拉取 OpenAI 模型列表">刷新列表</button>
+      <button class="mini" id="btnChangeModelKey" title="更换用于刷新列表的下游 API Key">更换 Key</button>
+      <div class="key-gate" id="modelKeyGate">
+        <input type="password" class="grow" id="modelKeyInput" placeholder="下游 API Key" autocomplete="off">
+        <button class="mini" id="btnSaveModelKey">确定</button>
+        <button class="mini" id="btnCancelModelKey">取消</button>
+      </div>
+    </div>
+    <div class="body"><ul class="models" id="models"></ul></div>
+    <div class="note">这里列出的是各端口真实收到的 ID。Anthropic 端口是伪装名,想单独控制它就直接点右侧的“精确”,把伪装 ID 写成规则。</div>
+  </section>
   <section class="card" style="grid-column:1/-1">
     <h2>预览 <span class="hint">用未保存的规则实时计算,排序与插件运行时同一套代码</span>
       <span class="spacer"></span><span class="chip" id="pvPort"></span></h2>
@@ -469,6 +467,22 @@ function renderPorts(){
 
 function currentCatalog(){ return state.catalogs.find(c => c.port === port) || { entries: [] }; }
 
+// providerModelsCarryOwnedBy 判断某个 provider 的模型是不是已经带 owned_by。
+//
+// 带 owned_by 的 provider（如 codex 的模型标 openai）由 CPA 自己认领，报告的归属
+// 也以 owned_by 为准，给它新建渠道不会产出任何建议，反而可能和内置命名冲突。
+// 用捕获到的 listing 判断；没有捕获时返回 false，宁可让人建也不要挡住真正需要的。
+function providerModelsCarryOwnedBy(provider){
+  const ids = Object.keys(credCatalog || {}).filter(id => (credCatalog[id] || []).includes(provider));
+  if (!ids.length) return false;
+  const owned = new Map();
+  (state.catalogs || []).forEach(c => (c.entries || []).forEach(e => owned.set(e.id, e.owned_by)));
+  if (!owned.size) return false;
+  const seen = ids.filter(id => owned.has(id));
+  if (!seen.length) return false;
+  return seen.every(id => String(owned.get(id) || "").trim() !== "");
+}
+
 function renderRules(){
   const box = $("rules");
   if (!state.order.length) {
@@ -616,6 +630,45 @@ function move(delta){
 // 判据（本机实测）：PATCH 后 config.yaml 里 force-mapping 计数应为满值；剥掉后
 // qoder-deepseek-v4.1-flash 立刻变 503 auth_unavailable。
 const ALIAS_PATH = MANAGEMENT_BASE_PATH + "/oauth-model-alias";
+const AUTH_FILES_PATH = MANAGEMENT_BASE_PATH + "/auth-files";
+const AUTH_MODELS_PATH = MANAGEMENT_BASE_PATH + "/auth-files/models";
+
+// credCatalog 把「裸模型名 → 服务它的渠道」记下来，用作补齐建议的兜底归属。
+//
+// 为什么需要它：有的 provider 让模型以空 owned_by 下发（本部署里 trae 的 20 个
+// 模型全部如此），报告只能按 owned_by 判渠道，于是它们一个都提不出来 —— 明明在用
+// 的渠道，报告却说没有缺失。插件读不到凭据目录（宿主没暴露这个 RPC），所以由面板
+// 读好后随请求一起传过去。已设 owned_by 的条目仍以 owned_by 为准，这里只补空值。
+let credCatalog = null;      // { modelId: ["trae", ...] }
+let credProviders = [];      // 凭据里出现过的 provider 名（去重排序）
+
+async function loadCredentialCatalog(){
+  const files = await call(AUTH_FILES_PATH);
+  const list = (files && files.files) || [];
+  const map = new Map();
+  const provs = new Set();
+  // 逐个凭据查它的模型目录。这是只读查询，不走上游、不消耗额度。
+  await Promise.all(list.map(async f => {
+    const name = f && f.name;
+    if (!name) return;
+    const provider = String(f.provider || "").trim().toLowerCase();
+    if (provider) provs.add(provider);
+    try {
+      const d = await call(AUTH_MODELS_PATH + "?name=" + encodeURIComponent(name));
+      ((d && d.models) || []).forEach(m => {
+        const id = m && m.id;
+        if (!id) return;
+        if (!map.has(id)) map.set(id, new Set());
+        if (provider) map.get(id).add(provider);
+      });
+    } catch (_) { /* 单个凭据查不到不影响整体 */ }
+  }));
+  const out = {};
+  map.forEach((set, id) => { if (set.size) out[id] = Array.from(set).sort(); });
+  credCatalog = out;
+  credProviders = Array.from(provs).sort();
+  return out;
+}
 
 // ALIAS_EDITABLE_KEYS 是面板允许编辑的字段。其余字段一律透传，绝不丢弃。
 const ALIAS_EDITABLE_KEYS = ["name", "alias"];
@@ -843,13 +896,68 @@ function renderAlias(){
   });
 }
 
+// newChannel 把「新建渠道」做成从真实凭据里挑，而不是让人凭空敲一个 provider 名。
+//
+// 起因：加了 trae 这类渠道后补齐建议仍然空空如也，因为模型是以空 owned_by 下发的，
+// 而报告当时只认 owned_by。现在归属判定有了凭据目录兜底，但入口这一侧同样要
+// 能看见「哪些 provider 其实已经有凭据」——否则用户不知道该敲什么名字，敲错了
+// 只会得到一个永远匹配不上的空渠道。
 function newChannel(){
-  const asked = prompt("新渠道名（一般是 provider 名，如 workbuddy）");
-  if (!asked) return;
-  const ch = asked.trim().toLowerCase();
+  const panel = $("chanAdd");
+  if (!panel) return;
+  if (panel.classList.contains("open")) { panel.classList.remove("open"); return; }
+  panel.innerHTML = "";
+  // 只列出「还没有渠道」的 provider，并分出哪些真的需要建。
+  //
+  // 有凭据不等于需要别名渠道：codex 的模型是以 owned_by=openai 下发的，已经被
+  // owned_by 认领，建了渠道也提不出任何建议（报告只按 owned_by 归属），只会多出
+  // 一个 CPA 拒收的空渠道。真正需要建的是让模型以空 owned_by 下发的 provider——
+  // trae 就是，它的 20 个模型因为当时只认 owned_by 而长期提不出建议。
+  const known = (credProviders || []).filter(p => !Object.prototype.hasOwnProperty.call(aliasDraft || {}, p));
+  const hint = document.createElement("span");
+  hint.className = "muted";
+  hint.style.fontSize = "12px";
+  hint.textContent = known.length
+    ? "已有凭据、但还没有别名渠道的 provider（带「可选」的通常不必建）："
+    : "凭据里没有新的 provider；也可以直接输入渠道名：";
+  panel.appendChild(hint);
+  known.forEach(p => {
+    const optional = providerModelsCarryOwnedBy(p);
+    const b = document.createElement("button");
+    b.className = "mini";
+    b.textContent = optional ? (p + "（可选）") : p;
+    b.title = optional
+      ? p + " 的模型已带 owned_by，报告不会为它给出建议；建渠道很可能得到一个空渠道"
+      : "为 " + p + " 新建别名渠道（它的模型以空 owned_by 下发，只能靠渠道配别名）";
+    if (optional) b.style.opacity = "0.7";
+    b.addEventListener("click", () => { panel.classList.remove("open"); createChannel(p); });
+    panel.appendChild(b);
+  });
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "或输入渠道名，如 trae";
+  input.style.flex = "1 1 160px";
+  input.addEventListener("keydown", ev => {
+    if (ev.key !== "Enter") return;
+    panel.classList.remove("open");
+    createChannel(input.value);
+  });
+  const ok = document.createElement("button");
+  ok.className = "mini";
+  ok.textContent = "新建";
+  ok.addEventListener("click", () => { panel.classList.remove("open"); createChannel(input.value); });
+  panel.append(input, ok);
+  panel.classList.add("open");
+}
+
+// createChannel 只做本地登记，保存仍由用户点「保存到 CPA」触发。
+function createChannel(raw){
+  const ch = String(raw || "").trim().toLowerCase();
   if (!ch) return;
   if (Object.prototype.hasOwnProperty.call(aliasDraft, ch)) {
     toast("err", "渠道 " + ch + " 已存在");
+    aliasChannel = ch;
+    renderAliasSafely();
     return;
   }
   // 只接受规范化后仍是合法渠道名的输入：CPA 以渠道名做配置键，空白、大小写
@@ -863,7 +971,7 @@ function newChannel(){
   aliasTouched();
   // 新建的渠道在线上还不存在，而 CPA 拒绝空渠道（PATCH 空 aliases 一律
   // 404 channel not found），所以直接把人引到输入框，别让他先点保存去撞墙。
-  toast("ok", "已新建渠道 " + ch + "，请至少添加一条别名再保存");
+  toast("ok", "已新建渠道 " + ch + "，点“补齐建议”按凭据目录列出该渠道缺的别名");
   $("aliasNewName").focus();
 }
 
@@ -1065,10 +1173,19 @@ async function showAliasSuggestions(){
   const button = $("btnAliasSuggest");
   button.disabled = true;
   try {
+    // 凭据目录是判渠道的兜底来源：有的 provider 让模型以空 owned_by 下发，
+    // 只靠 listing 会把它们全部漏掉。取不到也不影响基本功能。
+    if (!credCatalog) {
+      try { await loadCredentialCatalog(); }
+      catch (e) { toast("err", "读取凭据模型目录失败（补齐建议可能不完整）: " + e.message); }
+    }
     const d = await call(API + "/alias-report", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channels: Object.keys(aliasDraft || {}) })
+      body: JSON.stringify({
+        channels: Object.keys(aliasDraft || {}),
+        model_providers: credCatalog || {}
+      })
     });
     const list = $("aliasSuggest");
     list.innerHTML = "";
@@ -1098,10 +1215,22 @@ async function showAliasSuggestions(){
       const spacer = document.createElement("span");
       spacer.className = "spacer";
       const known = (aliasDraft[m.channel] || []).some(r => r.name === m.model);
+      // 目标别名可能已经被别的行占用。CPA 的表允许重复 alias，但那样两条 name
+      // 会指向同一个对外名，行为由 CPA 决定、不是这里能预期的，所以直接标出来
+      // 而不是默默填进去。本部署真实存在一例：workbuddy-kimi-k3 已指向 kimi-k3-1。
+      const taken = (aliasDraft[m.channel] || []).find(r => r.alias === m.alias && r.name !== m.model);
       const btn = document.createElement("button");
       btn.className = "mini";
-      btn.textContent = known ? "已存在" : "填入";
-      btn.disabled = known;
+      btn.textContent = known ? "已存在" : (taken ? "别名被占用" : "填入");
+      btn.disabled = known || !!taken;
+      if (taken) {
+        li.title = "别名 " + m.alias + " 已指向上游名 " + taken.name + "；直接填入会产生重复别名。";
+        const warn = document.createElement("span");
+        warn.className = "muted";
+        warn.style.fontSize = "12px";
+        warn.textContent = "（" + m.alias + " 已被 " + taken.name + " 占用）";
+        label.appendChild(warn);
+      }
       btn.addEventListener("click", () => {
         if (!aliasDraft[m.channel]) aliasDraft[m.channel] = [];
         aliasDraft[m.channel].push({ name: m.model, alias: m.alias });
