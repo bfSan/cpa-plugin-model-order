@@ -1020,6 +1020,8 @@ let aliasTable = null;      // {channel: [row]}，未加载时为 null
 let aliasDraft = null;      // 同上，编辑中
 let aliasDirtyChannels = new Set();
 let aliasChannel = "";     // 当前显示的 channel
+// 建议列表是为哪个渠道算的；null 表示没有建议。
+let aliasSuggestChannel = null;
 
 async function loadAliases(){
   const button = $("btnAliasLoad");
@@ -1072,6 +1074,75 @@ function aliasIsDirty(ch){
   return before.map(line).sort().join("\n") !== after.map(line).sort().join("\n");
 }
 
+function recomputeAliasDirty(){
+  const chans = new Set(Object.keys(aliasDraft || {}).concat(Object.keys(aliasTable || {})));
+  aliasDirtyChannels = new Set([...chans].filter(aliasIsDirty));
+}
+
+// dropStaleSuggestions 在渠道变化后作废旧建议。
+//
+// 建议是按当前渠道算的：它列的是"这个渠道缺哪些别名"。一旦切到别的渠道，
+// 同一份列表就变成了错误信息 —— 照它点「填入」会把另一渠道用不到的别名
+// 写进现在这个渠道。所以只在渠道没变时保留；变了就换成一句说明，而不是
+// 留着让人误用（此前切换渠道后旧建议会一直留在页面上）。
+function dropStaleSuggestions(){
+  const list = $("aliasSuggest");
+  if (!list) return;
+  if (aliasSuggestChannel === null) return;
+  if (aliasSuggestChannel === aliasChannel) return;
+  aliasSuggestChannel = null;
+  list.innerHTML = "";
+  const li = document.createElement("li");
+  li.className = "empty";
+  li.textContent = "已切换渠道，之前的建议已作废。点「补齐建议」按当前渠道重新扫描。";
+  list.appendChild(li);
+}
+
+// refreshAliasChrome 只更新编辑器**外围**那些便宜的东西：渠道 tab、行数、
+// 保存/放弃按钮的可用态与文案。表格本体不碰。
+//
+// 拆出来是因为输入时不能重建表格：重建会把正在编辑的 <input> 整个换成新的，
+// 焦点和光标位置一起丢失，表现就是"每敲一个字都得重新点一下输入框"。而输入
+// 唯一需要跟着变的就是这些外围状态（含当前渠道的条数与脏标记）。
+function refreshAliasChrome(){
+  const picker = $("aliasChannels");
+  picker.innerHTML = "";
+  const chans = Object.keys(aliasDraft).sort();
+  if (chans.indexOf(aliasChannel) < 0) aliasChannel = chans[0] || "";
+
+  chans.forEach(ch => {
+    const tab = document.createElement("span");
+    const dirty = aliasIsDirty(ch);
+    tab.className = "chan-tab" + (ch === aliasChannel ? " on" : "");
+    tab.textContent = ch;
+    const count = document.createElement("span");
+    count.className = "chan-count";
+    // 带 * 表示保存后这个渠道会和线上不一样。
+    count.textContent = (aliasDraft[ch] || []).length + (dirty ? " *" : "");
+    tab.appendChild(count);
+    tab.addEventListener("click", () => {
+      aliasChannel = ch;
+      dropStaleSuggestions();
+      renderAliasSafely();
+    });
+    picker.appendChild(tab);
+  });
+  // 渠道本身就是 CPA 表的 key，必须能新建，否则新增的别名无处安放。
+  const addTab = document.createElement("span");
+  addTab.className = "chan-tab";
+  addTab.textContent = "+ 渠道";
+  addTab.addEventListener("click", newChannel);
+  picker.appendChild(addTab);
+
+  const draftRows = (aliasDraft && aliasDraft[aliasChannel]) || [];
+  $("aliasCnt").textContent = draftRows.length + " 条 / 共 " + aliasTotalRows() + " 条";
+  $("btnAliasSave").disabled = aliasDirtyChannels.size === 0;
+  $("btnAliasRevert").disabled = aliasDirtyChannels.size === 0;
+  $("btnAliasSave").textContent = aliasDirtyChannels.size
+    ? ("保存 " + aliasDirtyChannels.size + " 个渠道")
+    : "保存到 CPA";
+}
+
 // normalizeAliasRowForCompare 把一行折叠成可比较的规范形式：键名排序，并把
 // undefined/null 归一成空串（输入框回读空值会变成空串，而线上可能是缺字段，
 // 两者语义相同，不该被当成改动）。
@@ -1086,8 +1157,7 @@ function normalizeAliasRowForCompare(row){
 
 function aliasTouched(){
   if (!aliasDraft) return;
-  const chans = new Set(Object.keys(aliasDraft).concat(Object.keys(aliasTable || {})));
-  aliasDirtyChannels = new Set([...chans].filter(aliasIsDirty));
+  recomputeAliasDirty();
   renderAliasSafely();
 }
 
@@ -1145,39 +1215,11 @@ function renderAlias(){
   const chans = Object.keys(aliasDraft).sort();
   if (chans.indexOf(aliasChannel) < 0) aliasChannel = chans[0] || "";
 
-  chans.forEach(ch => {
-    const tab = document.createElement("span");
-    const dirty = aliasIsDirty(ch);
-    tab.className = "chan-tab" + (ch === aliasChannel ? " on" : "");
-    tab.textContent = ch;
-    const count = document.createElement("span");
-    count.className = "chan-count";
-    // 带 * 表示保存后这个渠道会和线上不一样。
-    count.textContent = (aliasDraft[ch] || []).length + (dirty ? " *" : "");
-    tab.appendChild(count);
-    tab.addEventListener("click", () => { aliasChannel = ch; renderAliasSafely(); });
-    picker.appendChild(tab);
-  });
-  // 渠道本身就是 CPA 表的 key，必须能新建，否则新增的别名无处安放。
-  const addTab = document.createElement("span");
-  addTab.className = "chan-tab";
-  addTab.textContent = "+ 渠道";
-  addTab.addEventListener("click", newChannel);
-  picker.appendChild(addTab);
+  refreshAliasChrome();
 
-  // ★ 这里曾经是崩溃点：新建渠道只写 aliasDraft，不写 aliasTable，于是
-  // aliasTable[新渠道] 是 undefined，下面 .find() 抛 TypeError 并把整个
-  // renderAlias 打断——表现就是「新增渠道后列表不刷新、点了没反应」。
-  // 基线缺失等价于「这个渠道线上还不存在」，取空数组即可。
   const draftRows = (aliasDraft && aliasDraft[aliasChannel]) || [];
   const baselineRows = (aliasTable && aliasTable[aliasChannel]) || [];
   const rows = draftRows.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
-  $("aliasCnt").textContent = rows.length + " 条 / 共 " + aliasTotalRows() + " 条";
-  $("btnAliasSave").disabled = aliasDirtyChannels.size === 0;
-  $("btnAliasRevert").disabled = aliasDirtyChannels.size === 0;
-  $("btnAliasSave").textContent = aliasDirtyChannels.size
-    ? ("保存 " + aliasDirtyChannels.size + " 个渠道")
-    : "保存到 CPA";
 
   if (!rows.length) {
     const tr = document.createElement("tr");
@@ -1204,7 +1246,16 @@ function renderAlias(){
       input.type = "text";
       input.value = value;
       input.spellcheck = false;
-      input.addEventListener("input", () => { apply(input.value); aliasTouched(); });
+      // 输入时**绝不重建表格**：重建会把正在编辑的这个 <input> 换成新元素，
+      // 焦点与光标位置一起丢失，于是每敲一个字都要重新点一下输入框。
+      // 只刷新外围状态（条数、脏标记、按钮），并就地更新本行的"已改动"标记。
+      input.addEventListener("input", () => {
+        apply(input.value);
+        recomputeAliasDirty();
+        refreshAliasChrome();
+        const base = baselineRows.find(r => r.name === row.name);
+        tr.className = (!base || base.alias !== row.alias) ? "added" : "";
+      });
       td.appendChild(input);
       return td;
     };
@@ -1301,6 +1352,7 @@ function createChannel(raw){
   }
   aliasDraft[ch] = [];
   aliasChannel = ch;
+  dropStaleSuggestions();
   aliasTouched();
   // 新建的渠道在线上还不存在，而 CPA 拒绝空渠道（PATCH 空 aliases 一律
   // 404 channel not found），所以直接把人引到输入框，别让他先点保存去撞墙。
@@ -1543,6 +1595,9 @@ async function showAliasSuggestions(){
     });
     const list = $("aliasSuggest");
     list.innerHTML = "";
+    // 建议是按**当前渠道**算出来的，所以要记住它属于谁。切换渠道时必须作废：
+    // 对着 A 渠道的建议表去填 B 渠道，会把 B 用不到的别名写进 B。
+    aliasSuggestChannel = aliasChannel;
     const say = text => {
       const li = document.createElement("li");
       li.className = "empty";
