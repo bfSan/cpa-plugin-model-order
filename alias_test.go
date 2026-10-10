@@ -2,72 +2,52 @@ package main
 
 import (
 	"encoding/json"
-	"net/http"
 	"strings"
 	"testing"
 )
 
-// realChannels is the alias table as CPA actually holds it in this deployment:
-// qoder and workbuddy have channels, openai and cline do not.
-func realChannels() map[string]bool {
-	return map[string]bool{"qoder": true, "workbuddy": true, "cline": true}
+// pluginUpstream builds a provider's upstream listing the way the panel sends
+// it: names straight from the provider plugin's own model route.
+func pluginUpstream(models ...string) upstreamListing {
+	return upstreamListing{Models: models, Origin: "plugin"}
 }
 
-// aliasEntries mirrors the shape of the real captured listing. The fixture is the
-// state measured on this deployment: every openai, qoder and codex model already
-// carries its provider prefix, the workbuddy channel has three bare names, and
-// cline's models are provider/model pass-throughs.
-func realCatalogEntries() []catalogEntry {
-	return []catalogEntry{
-		// Already aliased: these arrive prefixed and must not be proposed again.
-		{ID: "qoder-auto", OwnedBy: "qoder"},
-		{ID: "qoder-balanced", OwnedBy: "qoder"},
-		{ID: "codex-gpt-6.1-sol", OwnedBy: "codex"},
-		{ID: "workbuddy-auto", OwnedBy: "workbuddy"},
-		{ID: "workbuddy-balanced", OwnedBy: "workbuddy"},
-		{ID: "workbuddy-space-bunny", OwnedBy: "workbuddy"},
-		// The three measured bare names.
-		{ID: "space-bunny", OwnedBy: "workbuddy"},
-		{ID: "hy4-preview-dev", OwnedBy: "workbuddy"},
-		{ID: "hy4-preview-x", OwnedBy: "workbuddy"},
-		// cline: the upstream names themselves. "cline-free/..." starts with the
-		// cline prefix without having been aliased, so it still wants a row.
-		{ID: "anthropic/claude-opus-5.5", OwnedBy: "cline"},
-		{ID: "anthropic/claude-sonnet-5.5", OwnedBy: "cline"},
-		{ID: "openai/gpt-6.1-sol", OwnedBy: "cline"},
-		{ID: "x-ai/grok-4.7", OwnedBy: "cline"},
-		{ID: "cline-free/solar-mini4", OwnedBy: "cline"},
-		// Not attributable: owned_by is the only source of the owning provider.
-		{ID: "some-unowned-model", OwnedBy: ""},
-		// No identity at all: readCatalogEntries drops these, but the report must
-		// still be safe if one reaches it.
-		{ID: "", OwnedBy: "workbuddy"},
-	}
+// authUpstream is the fallback shape, for providers with no model route.
+func authUpstream(models ...string) upstreamListing {
+	return upstreamListing{Models: models, Origin: "auth"}
 }
 
-// 别名表是判断"是否已经配过"的唯一权威。名字形态做不到这件事：
-// listing 里出现的是上游名还是别名，取决于别名有没有生效 —— 两种都要算"已覆盖"。
-func TestAliasReportSkipsModelsAlreadyInAliasTable(t *testing.T) {
-	entries := []catalogEntry{
-		// 表里有行（以别名形式出现在 listing 里）：不该再提议。
-		{ID: "workbuddy-space-bunny", OwnedBy: "workbuddy"},
-		{ID: "qoder-auto", OwnedBy: "qoder"},
-		// 表里没有行：真缺口，照常提议。
-		{ID: "hy4-preview-dev", OwnedBy: "workbuddy"},
-		// cline 的上游原名以 cline- 开头，但表里没有行 —— 正是"该加前缀"的一类。
-		{ID: "cline-free/solar-mini4", OwnedBy: "cline"},
-		{ID: "x-ai/grok-4.7", OwnedBy: "cline"},
+// The upstream name is what the table's `name` column points at, so a name the
+// table does not cover is the gap the report exists to find.
+func TestAliasReportProposesUpstreamNamesMissingFromTheTable(t *testing.T) {
+	channels := map[string]bool{"workbuddy": true, "qoder": true}
+	upstream := map[string]upstreamListing{
+		"workbuddy": pluginUpstream("hy3", "gemini-3.5-flash", "space-bunny"),
+		"qoder":     pluginUpstream("auto"),
 	}
 	existing := map[string]map[string]bool{
-		// 面板会同时送 name 与 alias：listing 里出现哪一个取决于别名是否已生效。
+		// Covered: these have rows already.
 		"workbuddy": {"space-bunny": true, "workbuddy-space-bunny": true},
 		"qoder":     {"auto": true, "qoder-auto": true},
-		"cline":     {},
 	}
-	report := buildAliasReportWithAliasTable(portOpenAI, entries, realChannels(), nil, existing)
+	report := buildAliasReport(channels, upstream, existing)
 
-	// 表里已有行的，不再提议，并记明原因。
-	for _, model := range []string{"workbuddy-space-bunny", "qoder-auto"} {
+	want := []struct{ model, alias, channel string }{
+		{"gemini-3.5-flash", "workbuddy-gemini-3.5-flash", "workbuddy"},
+		{"hy3", "workbuddy-hy3", "workbuddy"},
+	}
+	if len(report.Missing) != len(want) {
+		t.Fatalf("missing = %d rows, want %d: %+v", len(report.Missing), len(want), report.Missing)
+	}
+	for i, expect := range want {
+		got := report.Missing[i]
+		if got.Model != expect.model || got.Alias != expect.alias || got.Channel != expect.channel {
+			t.Errorf("row %d = %s/%s/%s, want %s/%s/%s",
+				i, got.Channel, got.Model, got.Alias, expect.channel, expect.model, expect.alias)
+		}
+	}
+	// 两个已覆盖的名字不提议，但要记明原因，不能只是消失。
+	for _, model := range []string{"space-bunny", "auto"} {
 		if _, ok := proposedFor(report, model); ok {
 			t.Errorf("%s already has an alias row and must not be proposed", model)
 		}
@@ -80,59 +60,259 @@ func TestAliasReportSkipsModelsAlreadyInAliasTable(t *testing.T) {
 			t.Errorf("%s reason = %q, want %q", model, row.Reason, reasonAlreadyAliased)
 		}
 	}
+}
 
-	// 表里没有的照常提议。
-	for _, want := range []struct{ model, alias string }{
-		{"hy4-preview-dev", "workbuddy-hy4-preview-dev"},
-		{"x-ai/grok-4.7", "cline-x-ai/grok-4.7"},
-		{"cline-free/solar-mini4", "cline-cline-free/solar-mini4"},
-	} {
-		row, ok := proposedFor(report, want.model)
+// 表里已覆盖的模型，可能以上游原名出现（行还没生效），也可能以别名出现
+// （CPA 已替换过）。两种形状都要算"已覆盖"，否则同一行会被重复建议。
+func TestAliasReportCoversBothNameAndAliasShapes(t *testing.T) {
+	channels := map[string]bool{"workbuddy": true}
+	upstream := map[string]upstreamListing{
+		// 前者是上游原名，后者是别名已经生效时的形状。
+		"workbuddy": pluginUpstream("space-bunny", "workbuddy-space-bunny", "brand-new"),
+	}
+	existing := map[string]map[string]bool{
+		"workbuddy": {"space-bunny": true, "workbuddy-space-bunny": true},
+	}
+	report := buildAliasReport(channels, upstream, existing)
+
+	if len(report.Missing) != 1 {
+		t.Fatalf("only brand-new is a gap: %+v", report.Missing)
+	}
+	if report.Missing[0].Model != "brand-new" {
+		t.Errorf("model = %q, want brand-new", report.Missing[0].Model)
+	}
+}
+
+// 面板没送别名表时不猜：全部列出。多列一行可以忽略，凭名字猜测而漏掉真缺口才是代价。
+func TestAliasReportWithoutTableProposesEverything(t *testing.T) {
+	report := buildAliasReport(
+		map[string]bool{"workbuddy": true, "qoder": true},
+		map[string]upstreamListing{
+			"workbuddy": pluginUpstream("space-bunny", "hy3"),
+			"qoder":     pluginUpstream("auto"),
+		},
+		nil,
+	)
+	if len(report.Missing) != 3 {
+		t.Fatalf("with no table every upstream model is a candidate: %+v", report.Missing)
+	}
+}
+
+// 有上游模型但没有别名渠道时，行没地方可写。这要单独报出来（面板才好提示建渠道），
+// 而不是把 71 个模型变成 71 条一模一样的抱怨。
+func TestAliasReportNamesProvidersWithoutAChannel(t *testing.T) {
+	channels := map[string]bool{"workbuddy": true}
+	upstream := map[string]upstreamListing{
+		"workbuddy": pluginUpstream("hy3"),
+		// CPA 内置的 openai 就长这样：模型名是本来就想对外提供的名字，
+		// 而且没有 openai 这个别名渠道，给它造行才是错的。
+		"openai": pluginUpstream("gpt-5.5", "gpt-6.1-sol"),
+	}
+	report := buildAliasReport(channels, upstream, nil)
+
+	if len(report.Missing) != 1 || report.Missing[0].Model != "hy3" {
+		t.Fatalf("only the workbuddy model has a channel to write to: %+v", report.Missing)
+	}
+	if len(report.NoChannel) != 1 {
+		t.Fatalf("no_channel = %+v, want one entry for openai", report.NoChannel)
+	}
+	got := report.NoChannel[0]
+	if got.Channel != "openai" || got.Served != 2 {
+		t.Errorf("no_channel entry = %+v, want openai with 2 served models", got)
+	}
+	// 没有渠道的 provider 不产生跳过记录：它的模型不是"被跳过"，是没地方写。
+	if _, ok := skippedFor(report, "gpt-5.5"); ok {
+		t.Error("a provider with no channel should be reported in no_channel, not as a skip row")
+	}
+}
+
+// 渠道读不到上游名单时，"没有缺失别名"并不等于没问题 —— 是无从判定，必须说清楚。
+func TestAliasReportNamesChannelsWithNoUpstreamList(t *testing.T) {
+	channels := map[string]bool{"workbuddy": true, "trae": true}
+	upstream := map[string]upstreamListing{
+		"workbuddy": pluginUpstream("hy3"),
+		// trae 没有任何条目：面板没能读到它的上游模型。
+	}
+	report := buildAliasReport(channels, upstream, nil)
+
+	var trae *aliasSourceStatus
+	for i := range report.Sources {
+		if report.Sources[i].Channel == "trae" {
+			trae = &report.Sources[i]
+		}
+	}
+	if trae == nil {
+		t.Fatalf("trae must appear in sources: %+v", report.Sources)
+	}
+	if trae.Origin != "none" {
+		t.Errorf("origin = %q, want none", trae.Origin)
+	}
+	row, ok := skippedFor(report, "")
+	if !ok {
+		t.Fatal("an unreadable channel must be recorded, or it reads as a clean bill of health")
+	}
+	if row.Reason != reasonNoUpstream {
+		t.Errorf("reason = %q, want %q", row.Reason, reasonNoUpstream)
+	}
+}
+
+// 渠道自己隐藏的模型到不了客户端，不需要别名；但它们要出现在报告里，
+// 否则操作者会以为这些模型凭空消失了。
+func TestAliasReportRecordsHiddenModelsWithoutProposingThem(t *testing.T) {
+	channels := map[string]bool{"cline": true}
+	upstream := map[string]upstreamListing{
+		"cline": {
+			Models: []string{"cline-free/step-5-preview"},
+			Hidden: []string{"cline-pass/glm-5.3", "cline-cloud/kimi-k3"},
+			Origin: "plugin",
+		},
+	}
+	report := buildAliasReport(channels, upstream, nil)
+
+	if len(report.Missing) != 1 || report.Missing[0].Model != "cline-free/step-5-preview" {
+		t.Fatalf("only the served model should be proposed: %+v", report.Missing)
+	}
+	for _, model := range []string{"cline-pass/glm-5.3", "cline-cloud/kimi-k3"} {
+		if _, ok := proposedFor(report, model); ok {
+			t.Errorf("%s is hidden by the provider and must not be proposed", model)
+		}
+		row, ok := skippedFor(report, model)
 		if !ok {
-			t.Errorf("%s has no row in the table and must be proposed", want.model)
+			t.Errorf("%s should be recorded as skipped", model)
 			continue
 		}
-		if row.Alias != want.alias {
-			t.Errorf("%s alias = %q, want %q", want.model, row.Alias, want.alias)
+		if row.Reason != reasonHidden {
+			t.Errorf("%s reason = %q, want %q", model, row.Reason, reasonHidden)
 		}
 	}
+	// 统计要能读出"总共看了多少、隐藏了多少、真判了多少"。
+	if len(report.Sources) != 1 {
+		t.Fatalf("sources = %+v, want one entry", report.Sources)
+	}
+	src := report.Sources[0]
+	if src.Total != 3 || src.Served != 1 || src.Hidden != 2 {
+		t.Errorf("source = %+v, want total 3 / served 1 / hidden 2", src)
+	}
 }
 
-// 面板没有送别名表时，报告退回"全部列出"：多列一行可以忽略，凭名字猜测而漏报
-// 真正的缺口才是代价。
-func TestAliasReportWithoutTableProposesEverything(t *testing.T) {
-	report := buildAliasReport(portOpenAI, []catalogEntry{
-		{ID: "workbuddy-space-bunny", OwnedBy: "workbuddy"},
-		{ID: "qoder-auto", OwnedBy: "qoder"},
-	}, realChannels())
+// 同一个上游名被两个渠道服务时，每个渠道各需要一行。
+func TestAliasReportProposesOneRowPerChannel(t *testing.T) {
+	channels := map[string]bool{"trae": true, "workbuddy": true}
+	upstream := map[string]upstreamListing{
+		"trae":      authUpstream("kimi-k3"),
+		"workbuddy": pluginUpstream("kimi-k3"),
+	}
+	report := buildAliasReport(channels, upstream, nil)
+
 	if len(report.Missing) != 2 {
-		t.Fatalf("with no table every attributable model is a candidate: %+v", report.Missing)
+		t.Fatalf("missing = %d rows, want 2: %+v", len(report.Missing), report.Missing)
+	}
+	if report.Missing[0].Channel != "trae" || report.Missing[1].Channel != "workbuddy" {
+		t.Errorf("channels = %q/%q, want trae/workbuddy",
+			report.Missing[0].Channel, report.Missing[1].Channel)
+	}
+	if report.Missing[0].Alias != "trae-kimi-k3" || report.Missing[1].Alias != "workbuddy-kimi-k3" {
+		t.Errorf("aliases = %q/%q, want trae-kimi-k3/workbuddy-kimi-k3",
+			report.Missing[0].Alias, report.Missing[1].Alias)
 	}
 }
 
-// The report reads the catalog the interceptor recorded, so it must survive a
-// listing that the plugin never touched: an unfiltered, already ordered body.
-func TestAliasReportOnUnchangedListingStillRecords(t *testing.T) {
-	loadPolicyConfig(t, "strategy: name\n")
-	headers := http.Header{"Authorization": {"Bearer any-key"}}
-	body := ownedListingBody([][2]string{
-		{"codex-gpt-6.1-sol", "codex"},
-		{"workbuddy-space-bunny", "workbuddy"},
-	})
-	if _, changed := governBody(portOpenAI, headers, body); changed {
-		t.Fatal("expected an already ordered listing to be reported unchanged")
+// 来源要回显出来：只有插件路由给的上游名单才是"它真正会提供的名字"，
+// 认证目录是退而求其次。操作者需要知道这次判定站在哪个来源上。
+func TestAliasReportEchoesUpstreamOrigins(t *testing.T) {
+	channels := map[string]bool{"workbuddy": true, "trae": true}
+	upstream := map[string]upstreamListing{
+		"workbuddy": pluginUpstream("hy3"),
+		"trae":      authUpstream("glm-5.3"),
 	}
-	snapshot, ok := catalog.get(portOpenAI)
-	if !ok {
-		t.Fatal("the catalog must record the listing even when nothing changed, or the alias report has nothing to read")
+	report := buildAliasReport(channels, upstream, nil)
+
+	origins := map[string]string{}
+	for _, src := range report.Sources {
+		origins[src.Channel] = src.Origin
 	}
-	report := buildAliasReport(snapshot.Port, snapshot.Entries, realChannels())
-	// 没有别名表信息时，能归属到 provider 的模型都会列出（codex 没有 channel，不列）。
+	if origins["workbuddy"] != "plugin" {
+		t.Errorf("workbuddy origin = %q, want plugin", origins["workbuddy"])
+	}
+	if origins["trae"] != "auth" {
+		t.Errorf("trae origin = %q, want auth", origins["trae"])
+	}
+}
+
+// Captured 是分母：参与判定的上游名数量（被渠道隐藏的不算，它们到不了客户端）。
+// Ignored 是其中没生成建议的数量，所以 Missing + Ignored == Captured 必须成立，
+// 否则面板那行概要会自相矛盾。
+func TestAliasReportCountsAddUp(t *testing.T) {
+	channels := map[string]bool{"workbuddy": true}
+	upstream := map[string]upstreamListing{
+		"workbuddy": {
+			Models: []string{"hy3", "space-bunny", "already-good"},
+			Hidden: []string{"hidden-model"},
+			Origin: "plugin",
+		},
+	}
+	existing := map[string]map[string]bool{
+		"workbuddy": {"already-good": true},
+	}
+	report := buildAliasReport(channels, upstream, existing)
+
+	// 三个被服务的名字参与判定；hidden-model 不算 Captured（它到不了客户端）。
+	if report.Captured != 3 {
+		t.Errorf("captured = %d, want 3", report.Captured)
+	}
+	// 只有已覆盖的那一个没生成建议；隐藏的不算进 Ignored。
+	if report.Ignored != 1 {
+		t.Errorf("ignored = %d, want 1", report.Ignored)
+	}
+	if len(report.Missing)+report.Ignored != report.Captured {
+		t.Errorf("missing(%d) + ignored(%d) != captured(%d)",
+			len(report.Missing), report.Ignored, report.Captured)
+	}
+	// 隐藏的那个仍然要有一条记录，否则它会凭空消失。
+	if row, ok := skippedFor(report, "hidden-model"); !ok || row.Reason != reasonHidden {
+		t.Errorf("hidden-model should be recorded as hidden, got %+v/%v", row, ok)
+	}
+}
+
+// 面板送来的 provider 名大小写不统一，匹配前必须归一化，否则工作白做。
+func TestAliasReportNormalisesProviderCase(t *testing.T) {
+	channels := map[string]bool{"workbuddy": true}
+	upstream := map[string]upstreamListing{
+		"WorkBuddy": pluginUpstream("hy3"),
+	}
+	report := buildAliasReport(channels, upstream, nil)
+
 	if len(report.Missing) != 1 {
-		t.Fatalf("the workbuddy model should be listed: %+v", report.Missing)
+		t.Fatalf("the listing's case must not change the result: %+v", report.Missing)
 	}
-	if report.Missing[0].Model != "workbuddy-space-bunny" {
-		t.Errorf("model = %q, want workbuddy-space-bunny", report.Missing[0].Model)
+	if report.Missing[0].Channel != "workbuddy" {
+		t.Errorf("channel = %q, want workbuddy", report.Missing[0].Channel)
+	}
+	if len(report.NoChannel) != 0 {
+		t.Errorf("no_channel = %+v, want none: the channel does exist", report.NoChannel)
+	}
+}
+
+func TestProviderPrefix(t *testing.T) {
+	if got := providerPrefix("workbuddy"); got != "workbuddy-" {
+		t.Errorf("providerPrefix = %q, want workbuddy-", got)
+	}
+	if got := providerPrefix("  WorkBuddy  "); got != "workbuddy-" {
+		t.Errorf("providerPrefix should normalise case and space, got %q", got)
+	}
+}
+
+func TestSortedKeys(t *testing.T) {
+	got := sortedKeys(map[string]bool{"workbuddy": true, "qoder": true, "openai": false})
+	if len(got) != 2 || got[0] != "qoder" || got[1] != "workbuddy" {
+		t.Errorf("sortedKeys = %v, want [qoder workbuddy]", got)
+	}
+}
+
+func TestSortedUpstreamKeys(t *testing.T) {
+	got := sortedUpstreamKeys(map[string]upstreamListing{"z": {}, "a": {}, "m": {}})
+	if len(got) != 3 || got[0] != "a" || got[1] != "m" || got[2] != "z" {
+		t.Errorf("sortedUpstreamKeys = %v, want [a m z]", got)
 	}
 }
 
@@ -150,186 +330,4 @@ func ownedListingBody(models [][2]string) []byte {
 	}
 	builder.WriteString(`]}`)
 	return []byte(builder.String())
-}
-
-func TestProviderPrefix(t *testing.T) {
-	if got := providerPrefix("workbuddy"); got != "workbuddy-" {
-		t.Errorf("providerPrefix = %q, want workbuddy-", got)
-	}
-	if got := providerPrefix("  WorkBuddy  "); got != "workbuddy-" {
-		t.Errorf("providerPrefix should normalise case and space, got %q", got)
-	}
-}
-
-// The channel set is the authority on which providers participate. A provider
-// absent from it is skipped even when its models look bare, which is what keeps
-// CPA's built-in openai out of the report: gpt-5.5 and gpt-6.1-sol are the
-// intended names and there is no openai alias channel to add them to.
-func TestAliasReportSkipsProvidersWithoutAChannel(t *testing.T) {
-	entries := []catalogEntry{
-		{ID: "gpt-5.5", OwnedBy: "openai"},
-		{ID: "gpt-6.1-sol", OwnedBy: "openai"},
-		{ID: "anthropic/claude-opus-5.5", OwnedBy: "cline"},
-		{ID: "workbuddy-auto", OwnedBy: "workbuddy"},
-		{ID: "space-bunny", OwnedBy: "workbuddy"},
-	}
-	report := buildAliasReport(portOpenAI, entries, map[string]bool{"qoder": true, "workbuddy": true})
-	// 显式 channel 列表是权威：openai 与 cline 不在其中，没有地方可写。
-	if len(report.Missing) != 2 {
-		t.Fatalf("missing = %+v, want both workbuddy names", report.Missing)
-	}
-	if _, ok := proposedFor(report, "space-bunny"); !ok {
-		t.Error("space-bunny is a real gap and must be proposed")
-	}
-	// openai 两条 + cline 一条都不在 channels 里，没有地方可写。
-	if report.Ignored != 3 {
-		t.Errorf("ignored = %d, want 3", report.Ignored)
-	}
-	if got := report.Channels; len(got) != 2 || got[0] != "qoder" || got[1] != "workbuddy" {
-		t.Errorf("channels = %v, want [qoder workbuddy]", got)
-	}
-}
-
-// With no channel list the report still has to work, so it falls back to reading
-// adoption off the listing: a provider whose models mostly carry the prefix is
-// using the convention, and its bare names are the gap.
-func TestAliasReportFallsBackToTheListing(t *testing.T) {
-	entries := []catalogEntry{
-		// workbuddy: 3 prefixed of 4, so the majority signals adoption.
-		{ID: "workbuddy-auto", OwnedBy: "workbuddy"},
-		{ID: "workbuddy-fast", OwnedBy: "workbuddy"},
-		{ID: "workbuddy-kimi-k3", OwnedBy: "workbuddy"},
-		{ID: "space-bunny", OwnedBy: "workbuddy"},
-		// openai: none prefixed, so it is not participating.
-		{ID: "gpt-6.1-sol", OwnedBy: "openai"},
-		{ID: "gpt-6-sol", OwnedBy: "openai"},
-	}
-	report := buildAliasReport(portOpenAI, entries, nil)
-	// workbuddy 多数名字带前缀，采用约定因此参与，四个都列出；
-	// openai 没有前缀，不参与，其两条不提议。
-	if _, ok := proposedFor(report, "space-bunny"); !ok {
-		t.Fatalf("space-bunny should be proposed: %+v", report.Missing)
-	}
-	if _, ok := proposedFor(report, "gpt-6.1-sol"); ok {
-		t.Errorf("openai does not participate here and must not be proposed: %+v", report.Missing)
-	}
-	if len(report.Missing) != 4 {
-		t.Errorf("missing = %+v, want the four workbuddy names", report.Missing)
-	}
-	if len(report.Channels) != 0 {
-		t.Errorf("channels = %v, want empty when no list was supplied", report.Channels)
-	}
-}
-
-func TestSortedKeys(t *testing.T) {
-	got := sortedKeys(map[string]bool{"workbuddy": true, "qoder": true, "openai": false})
-	if len(got) != 2 || got[0] != "qoder" || got[1] != "workbuddy" {
-		t.Errorf("sortedKeys = %v, want [qoder workbuddy]", got)
-	}
-}
-
-// trae is the case this fallback exists for. Every one of its models reaches
-// clients with an empty owned_by -- measured on the live deployment -- so before
-// the credential catalog was supplied, the report dropped all twenty and said
-// nothing about a provider that was plainly in use.
-func TestAliasReportAttributesEntriesFromCredentialCatalog(t *testing.T) {
-	entries := []catalogEntry{
-		{ID: "Doubao-Seed-Evolving"},           // owned_by empty, catalog knows trae
-		{ID: "glm-5.3"},                        // owned_by empty, catalog knows trae
-		{ID: "hy3"},                            // owned_by empty, catalog knows workbuddy
-		{ID: "gpt-6.1-sol", OwnedBy: "openai"}, // owned_by wins
-	}
-	providers := map[string][]string{
-		"Doubao-Seed-Evolving": {"trae"},
-		"glm-5.3":              {"trae"},
-		"hy3":                  {"workbuddy"},
-		"gpt-6.1-sol":          {"trae"}, // must be ignored: owned_by is set
-	}
-	report := buildAliasReportWithProviders(portOpenAI, entries,
-		map[string]bool{"trae": true, "workbuddy": true}, providers)
-
-	want := []struct{ model, alias, channel string }{
-		{"Doubao-Seed-Evolving", "trae-Doubao-Seed-Evolving", "trae"},
-		{"glm-5.3", "trae-glm-5.3", "trae"},
-		{"hy3", "workbuddy-hy3", "workbuddy"},
-	}
-	if len(report.Missing) != len(want) {
-		t.Fatalf("missing = %d rows, want %d: %+v", len(report.Missing), len(want), report.Missing)
-	}
-	for i, expect := range want {
-		got := report.Missing[i]
-		if got.Model != expect.model || got.Alias != expect.alias || got.Channel != expect.channel {
-			t.Errorf("row %d = %s/%s/%s, want %s/%s/%s",
-				i, got.Channel, got.Model, got.Alias, expect.channel, expect.model, expect.alias)
-		}
-	}
-	// gpt-6.1-sol stays attributed to openai, which has no channel, so it is
-	// skipped rather than proposed for trae.
-	if report.Ignored != 1 {
-		t.Errorf("ignored = %d, want 1", report.Ignored)
-	}
-}
-
-// A provider that only the credential catalog knows still has to clear the
-// channel gate: a catalog entry is not by itself permission to invent an alias.
-func TestAliasReportCatalogProviderNeedsAChannel(t *testing.T) {
-	entries := []catalogEntry{{ID: "glm-5.3"}}
-	providers := map[string][]string{"glm-5.3": {"trae"}}
-	report := buildAliasReportWithProviders(portOpenAI, entries, map[string]bool{"workbuddy": true}, providers)
-	if len(report.Missing) != 0 {
-		t.Fatalf("missing = %+v, want none: trae has no channel", report.Missing)
-	}
-	if report.Ignored != 1 {
-		t.Errorf("ignored = %d, want 1", report.Ignored)
-	}
-}
-
-// One bare name served by two channels needs a row in each, so dedup has to key
-// on the channel as well as the id. kimi-k3 is exactly this on the live
-// deployment: trae and workbuddy both serve it with an empty owned_by.
-func TestAliasReportProposesOneRowPerServingChannel(t *testing.T) {
-	entries := []catalogEntry{{ID: "kimi-k3"}}
-	providers := map[string][]string{"kimi-k3": {"trae", "workbuddy"}}
-	report := buildAliasReportWithProviders(portOpenAI, entries,
-		map[string]bool{"trae": true, "workbuddy": true}, providers)
-	if len(report.Missing) != 2 {
-		t.Fatalf("missing = %d rows, want 2: %+v", len(report.Missing), report.Missing)
-	}
-	got := []string{report.Missing[0].Channel, report.Missing[1].Channel}
-	if got[0] != "trae" || got[1] != "workbuddy" {
-		t.Errorf("channels = %v, want [trae workbuddy]", got)
-	}
-	if report.Missing[0].Alias != "trae-kimi-k3" || report.Missing[1].Alias != "workbuddy-kimi-k3" {
-		t.Errorf("aliases = %q/%q, want trae-kimi-k3/workbuddy-kimi-k3",
-			report.Missing[0].Alias, report.Missing[1].Alias)
-	}
-}
-
-// The mapping is a fallback, not an override: without it behavior is unchanged,
-// which is what keeps the openai models from coming back as noise.
-func TestAliasReportWithoutCatalogMappingIsUnchanged(t *testing.T) {
-	entries := realCatalogEntries()
-	withFallback := buildAliasReportWithProviders(portOpenAI, entries, realChannels(), nil)
-	without := buildAliasReport(portOpenAI, entries, realChannels())
-	if len(withFallback.Missing) != len(without.Missing) {
-		t.Fatalf("nil mapping changed the report: %d vs %d rows",
-			len(withFallback.Missing), len(without.Missing))
-	}
-	if withFallback.Ignored != without.Ignored {
-		t.Errorf("ignored = %d with nil mapping, want %d", withFallback.Ignored, without.Ignored)
-	}
-}
-
-// An id the credential catalog does not know stays unattributed, so it is
-// skipped rather than guessed at.
-func TestAliasReportSkipsIDsAbsentFromTheCatalog(t *testing.T) {
-	entries := []catalogEntry{{ID: "mystery-model"}}
-	report := buildAliasReportWithProviders(portOpenAI, entries,
-		map[string]bool{"trae": true}, map[string][]string{"other": {"trae"}})
-	if len(report.Missing) != 0 {
-		t.Fatalf("missing = %+v, want none", report.Missing)
-	}
-	if report.Ignored != 1 {
-		t.Errorf("ignored = %d, want 1", report.Ignored)
-	}
 }

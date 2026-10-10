@@ -386,7 +386,7 @@ function toast(kind, msg){
 }
 
 /* ---- 状态 ---- */
-let state = { strategy: "grouped", caseSensitive: false, order: [], configured: false, suggestedOrder: [], catalogs: [], fullCatalogs: [] };
+let state = { strategy: "grouped", caseSensitive: false, order: [], configured: false, suggestedOrder: [], catalogs: [], fullCatalogs: [], pluginModelRoutes: {} };
 let port = "";
 let dirty = false;
 let previewIds = [];
@@ -701,20 +701,14 @@ function renderPorts(){
 
 function currentCatalog(){ return state.catalogs.find(c => c.port === port) || { entries: [] }; }
 
-// providerModelsCarryOwnedBy 判断某个 provider 的模型是不是已经带 owned_by。
+// upstreamOriginOf 说明某个 provider 的上游名单会从哪里取。
 //
-// 带 owned_by 的 provider（如 codex 的模型标 openai）由 CPA 自己认领，报告的归属
-// 也以 owned_by 为准，给它新建渠道不会产出任何建议，反而可能和内置命名冲突。
-// 用捕获到的 listing 判断；没有捕获时返回 false，宁可让人建也不要挡住真正需要的。
-function providerModelsCarryOwnedBy(provider){
-  const ids = Object.keys(credCatalog || {}).filter(id => (credCatalog[id] || []).includes(provider));
-  if (!ids.length) return false;
-  const owned = new Map();
-  (state.catalogs || []).forEach(c => (c.entries || []).forEach(e => owned.set(e.id, e.owned_by)));
-  if (!owned.size) return false;
-  const seen = ids.filter(id => owned.has(id));
-  if (!seen.length) return false;
-  return seen.every(id => String(owned.get(id) || "").trim() !== "");
+// 这个标签存在的意义是让操作者知道"建了这个渠道之后能不能得到建议"，而不是替
+// 他判断该不该建：有插件 /models 路由的（cline/qoder/workbuddy）拿到的是它真正会
+// 对外提供的上游名；没有的（trae/codex）退回认证目录，同样能给出建议。两者都能用，
+// 差别只在来源，所以这里只标注来源，不筛掉任何候选 —— 该不该建由操作者决定。
+function upstreamOriginOf(provider){
+  return (state.pluginModelRoutes || {})[provider] === false ? "auth" : "plugin";
 }
 
 function renderRules(){
@@ -912,12 +906,15 @@ const ALIAS_PATH = MANAGEMENT_BASE_PATH + "/oauth-model-alias";
 const AUTH_FILES_PATH = MANAGEMENT_BASE_PATH + "/auth-files";
 const AUTH_MODELS_PATH = MANAGEMENT_BASE_PATH + "/auth-files/models";
 
-// credCatalog 把「裸模型名 → 服务它的渠道」记下来，用作补齐建议的兜底归属。
+// credCatalog 把「模型名 → 服务它的渠道」记下来，用作补齐建议的兜底归属。
 //
 // 为什么需要它：有的 provider 让模型以空 owned_by 下发（本部署里 trae 的 20 个
 // 模型全部如此），报告只能按 owned_by 判渠道，于是它们一个都提不出来 —— 明明在用
 // 的渠道，报告却说没有缺失。插件读不到凭据目录（宿主没暴露这个 RPC），所以由面板
-// 读好后随请求一起传过去。已设 owned_by 的条目仍以 owned_by 为准，这里只补空值。
+// 读好后随请求一起传过去。
+//
+// 注意这里拿到的是「凭证已注册给客户端」的名字，别名可能已经套上了；因此它只用来
+// 判归属，不用来判该不该加别名 —— 那是 loadUpstreamModels 的事。
 let credCatalog = null;      // { modelId: ["trae", ...] }
 let credProviders = [];      // 凭据里出现过的 provider 名（去重排序）
 
@@ -946,6 +943,60 @@ async function loadCredentialCatalog(){
   map.forEach((set, id) => { if (set.size) out[id] = Array.from(set).sort(); });
   credCatalog = out;
   credProviders = Array.from(provs).sort();
+  return out;
+}
+
+// loadUpstreamModels 收集每个渠道的「上游模型名」，这是补齐建议唯一正确的比较对象。
+//
+// 为什么不能用 /v1/models：那份列表里 CPA 的别名已经套用过了，拿它去比别名表是循环
+// 论证 —— 已经配好行的模型会以裸名进来（看起来缺行），别名过期的模型反而看着正常。
+// 而且它不实时：CPA 只在有客户端拉过之后才更新，所以报告可能描述一份已经不存在的
+// 模型列表，却和新鲜的一模一样。这个名字列表必须来自别名生效之前的地方。
+//
+// 两个来源，按优先级：
+//   1) 各 provider 插件自己的 /models（本部署里 cline/qoder/workbuddy 都有），
+//      这是它真正会对外提供的上游名，最准确；overlay.hide 里的名字单独带出来，
+//      报告要说明「被渠道自己隐藏所以不需要别名」，而不是当它不存在。
+//   2) 插件没有该路由时（trae/codex），退回各认证目录的并集，这也是上游视角。
+async function loadUpstreamModels(providers){
+  const wanted = Array.from(new Set((providers || []).map(p => String(p || "").trim().toLowerCase()).filter(Boolean)));
+  const out = {};
+  async function fromPlugin(provider){
+    try {
+      const d = await call(MANAGEMENT_BASE_PATH + "/plugins/" + encodeURIComponent(provider) + "/models");
+      const ms = (d && d.models) || [];
+      if (!ms.length) return null;
+      const models = [];
+      ms.forEach(m => {
+        const id = (m && (m.ID || m.id)) || "";
+        if (id) models.push(String(id));
+      });
+      if (!models.length) return null;
+      // overlay.hide 是渠道自己的隐藏规则。带出来让报告能区分「被隐藏」与「真的缺行」。
+      const ov = (d && d.overlay) || {};
+      const hide = ((ov.overlay && ov.overlay.hide) || ov.hide || []) || [];
+      // 隐藏项从待判列表里去掉：隐藏的模型到不了客户端，不需要别名。
+      const hiddenSet = new Set();
+      const kept = [];
+      models.forEach(id => {
+        if (hide.some(p => testPattern(p, id, state.caseSensitive))) hiddenSet.add(id);
+        else kept.push(id);
+      });
+      return { models: kept, hidden: Array.from(hiddenSet), origin: "plugin" };
+    } catch (_) { return null; }
+  }
+  await Promise.all(wanted.map(async provider => {
+    const viaPlugin = await fromPlugin(provider);
+    // 记下这个 provider 到底有没有插件 /models 路由，建渠道建议要用它标注来源。
+    state.pluginModelRoutes[provider] = !!viaPlugin;
+    if (viaPlugin) { out[provider] = viaPlugin; return; }
+    // 退回凭据目录：按 provider 收并集。
+    const ids = new Set();
+    Object.keys(credCatalog || {}).forEach(id => {
+      if ((credCatalog[id] || []).includes(provider)) ids.add(id);
+    });
+    if (ids.size) out[provider] = { models: Array.from(ids), origin: "auth" };
+  }));
   return out;
 }
 
@@ -1200,18 +1251,18 @@ function newChannel(){
   hint.className = "muted";
   hint.style.fontSize = "12px";
   hint.textContent = known.length
-    ? "已有凭据、但还没有别名渠道的 provider（带「可选」的通常不必建）："
+    ? "已有凭据、但还没有别名渠道的 provider（来源决定上游名单从哪取）："
     : "凭据里没有新的 provider；也可以直接输入渠道名：";
   panel.appendChild(hint);
   known.forEach(p => {
-    const optional = providerModelsCarryOwnedBy(p);
     const b = document.createElement("button");
     b.className = "mini";
-    b.textContent = optional ? (p + "（可选）") : p;
-    b.title = optional
-      ? p + " 的模型已带 owned_by，报告不会为它给出建议；建渠道很可能得到一个空渠道"
-      : "为 " + p + " 新建别名渠道（它的模型以空 owned_by 下发，只能靠渠道配别名）";
-    if (optional) b.style.opacity = "0.7";
+    // 标注上游名单的来源：有插件 /models 路由的最准，退回认证目录的同样可用。
+    // 不因为来源不同而过滤候选 —— 该不该建由操作者决定。
+    const origin = upstreamOriginOf(p);
+    b.textContent = p + (origin === "plugin" ? "（插件列表）" : "（认证目录）");
+    b.title = "为 " + p + " 新建别名渠道。上游名单来源：" +
+      (origin === "plugin" ? "该插件自己的 /models 路由（最准确）" : "认证目录的并集（该插件没有 /models 路由）");
     b.addEventListener("click", () => { panel.classList.remove("open"); createChannel(p); });
     panel.appendChild(b);
   });
@@ -1461,16 +1512,23 @@ async function showAliasSuggestions(){
       try { await loadCredentialCatalog(); }
       catch (e) { toast("err", "读取凭据模型目录失败（补齐建议可能不完整）: " + e.message); }
     }
+    // 渠道集合 = 别名表里已有的渠道 + 凭据里出现过的 provider。后者是为了让
+    // "有上游模型但还没有渠道" 的 provider 也被报告出来，面板才好提示建渠道。
+    const channelNames = Array.from(new Set(
+      Object.keys(aliasDraft || {}).concat(credProviders || [])
+    ).map(s => String(s || "").trim().toLowerCase()).filter(Boolean));
+    // 上游名单是这次判定的比较对象，实时收集，不读任何缓存快照。
+    const upstream = await loadUpstreamModels(channelNames);
     const d = await call(API + "/alias-report", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         channels: Object.keys(aliasDraft || {}),
-        model_providers: credCatalog || {},
+        upstream,
         // 把当前别名表一并送上，让后端据此判断"这个模型已经有别名的行"。
         // 后端无法自己读这张表（宿主只通过 StaticModelRequest 暴露
         // OAuthModelAlias，而响应拦截器收不到），所以由面板带上。
-        // 同时送 name 与 alias：一个模型若已有行，它在 listing 里可能以上游原名
+        // 同时送 name 与 alias：一个模型若已有行，它在列表里可能以上游原名
         // 出现（行还没生效），也可能以别名出现（CPA 已替换过），两者都算"已覆盖"。
         existing_aliases: Object.fromEntries(
           Object.entries(aliasDraft || {}).map(([ch, rows]) => [
@@ -1488,26 +1546,39 @@ async function showAliasSuggestions(){
       li.textContent = text;
       list.appendChild(li);
     };
-    if (d.error === "no_listing_captured") {
-      say(d.note || "尚未捕获模型列表，先用任意客户端拉一次 /v1/models。");
+    if (d.error === "nothing_to_compare") {
+      say(d.note || "没有任何渠道或上游模型列表可以比较。");
       return;
     }
-    // 只在 OpenAI 端口上提建议：Codex 目录是 slug 形态，Anthropic 端口的名字经
-    // CPA 核心伪装，两者都不适合直接对着填 oauth-model-alias。
-    const report = (d.reports || []).find(r => r.port === "openai") || (d.reports || [])[0];
-    // 这份报告判的是「插件捕获的那份 listing」，不是实时的 /v1/models。快照只在
-    // 有客户端真的拉过一次列表时才更新，所以它可能比 CPA 现在提供的模型旧 ——
-    // 「插件列了 5 个、这里只建议 4 个」就是这么来的。不带时间戳的话，一份过时的
-    // 报告和一份刚抓的看起来完全一样，操作者只会以为判定错了。把时间摆在最上面。
-    if (report && report.captured_at) {
-      const when = new Date(report.captured_at);
-      if (!isNaN(when)) {
-        const mins = Math.floor((Date.now() - when.getTime()) / 60000);
-        const age = mins < 1 ? "刚刚" : (mins < 60 ? mins + " 分钟前" : Math.floor(mins / 60) + " 小时前");
-        const count = report.listing_count || report.captured || 0;
-        say("列表快照：" + age + "（" + when.toLocaleTimeString() + "，共 " + count + " 个模型）。" +
-            "报告判的是这份快照；若与插件现在的模型列表不一致，先拉一次 /v1/models 再重新扫描。");
+    const report = (d.reports || [])[0] || {};
+    // 报告描述的是这次实时收集到的上游列表，所以先把"判了多少、从哪来"说清楚：
+    // 一个渠道若读不到上游名单，它的"没有缺失别名"并不等于没有问题，而是无从判定。
+    const sources = report.sources || [];
+    if (sources.length) {
+      const none = sources.filter(s => s.origin === "none");
+      const fromPlugin = sources.filter(s => s.origin === "plugin").length;
+      const fromAuth = sources.filter(s => s.origin === "auth").length;
+      const parts = [];
+      if (fromPlugin) parts.push(fromPlugin + " 个渠道取自插件实时列表");
+      if (fromAuth) parts.push(fromAuth + " 个渠道取自认证目录");
+      if (parts.length) {
+        say("实时上游：" + parts.join("，") + "，共 " + (report.captured || 0) +
+            " 个上游模型参与判定。");
       }
+      if (none.length) {
+        say("读不到上游列表的渠道：" + none.map(s => s.channel).join("、") +
+            " —— 它们的别名缺失无法判定，不代表没有问题。");
+      }
+      const hiddenTotal = sources.reduce((n, s) => n + (s.hidden || 0), 0);
+      if (hiddenTotal) {
+        say("另有 " + hiddenTotal + " 个上游模型被各渠道自己的隐藏规则挡住，到不了客户端，不需要别名。");
+      }
+    }
+    const noChannel = report.no_channel || [];
+    if (noChannel.length) {
+      say("以下 provider 有上游模型但没有别名渠道，无法为它们写行：" +
+          noChannel.map(s => s.channel + "（" + (s.served || 0) + " 个）").join("、") +
+          "。需要的话先用上面的输入框建渠道。");
     }
     const missing = (report && report.missing) || [];
     const mine = missing.filter(m => !aliasChannel || m.channel === aliasChannel);

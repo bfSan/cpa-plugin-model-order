@@ -121,42 +121,43 @@ func handleManagement(raw []byte) ([]byte, error) {
 	}
 }
 
-// aliasReportRequest carries the alias channel names the report should judge
-// against.
+// aliasReportRequest carries everything the report needs to judge aliases, all
+// of it gathered by the panel because the plugin cannot gather it itself.
 type aliasReportRequest struct {
-	// Channels lists the providers that have a channel in CPA's
-	// oauth-model-alias table. The panel reads that table anyway in order to
-	// write it, so it passes the names through rather than the plugin guessing
-	// which providers participate: CPA's built-in openai serves gpt-6.1-sol and
-	// friends under their intended names and has no channel at all, and treating
-	// its fourteen models as missing aliases buried the real report in noise.
-	//
-	// Empty is allowed and means "unknown": the report then judges from the
-	// listing instead.
+	// Channels lists the providers that have a channel in CPA's oauth-model-alias
+	// table. A row can only be written to a channel that exists, so this drives
+	// the report. The panel reads the table anyway in order to write it.
 	Channels []string `json:"channels"`
-	// ModelProviders maps a bare model id to the providers whose credentials
-	// serve it, which the panel derives from the credential model catalogs.
+	// Upstream maps each provider to the UPSTREAM names it currently offers,
+	// which is what the table's `name` column has to be compared against.
 	//
-	// It exists because owned_by is not always set. trae reaches clients with an
-	// empty owned_by on all twenty of its models, so the report dropped every one
-	// of them and had nothing to say about a provider that was plainly in use.
-	// The plugin cannot read the credential catalogs itself -- the host exposes no
-	// RPC for them -- so the panel supplies the mapping.
-	ModelProviders map[string][]string `json:"model_providers"`
-	// ExistingAliases maps a channel to the model names it already has a row
-	// for, so a model with a row is not proposed again. The panel holds the table
-	// (it fetches it in order to write it), and the plugin cannot read it: the
-	// host exposes OAuthModelAlias only through StaticModelRequest, which a
-	// response interceptor never receives.
+	// It must not come from /v1/models: that listing already has CPA's aliases
+	// substituted, so a model with a correct row looks like a bare name with no
+	// row, and the comparison becomes circular. It is also not live -- CPA serves
+	// it from the last client request -- so it can describe a model list that no
+	// longer exists.
+	//
+	// The live names come from each provider plugin's own /models route, or for
+	// providers without one, from the per-credential catalog. The host exposes no
+	// RPC for either, so the panel collects them and passes them through.
+	Upstream map[string]upstreamListing `json:"upstream"`
+	// ExistingAliases maps a channel to the model names it already has a row for,
+	// so a covered model is not proposed again. The panel holds the table (it
+	// fetches it in order to write it), and the plugin cannot read it: the host
+	// exposes OAuthModelAlias only through StaticModelRequest, which a response
+	// interceptor never receives.
 	ExistingAliases map[string][]string `json:"existing_aliases"`
 }
 
-// handleAliasReport answers "which models are leaking under a bare name".
+// handleAliasReport answers "which upstream models still reach clients under a
+// bare name".
 //
-// It reads only the catalog the plugin already recorded from real client
-// traffic, so it needs no upstream call and cannot perturb the listing. When
-// nothing has been captured the response says so instead of returning an empty
-// report that reads like "no problems found".
+// The panel supplies both the channels and each channel's live upstream model
+// list, because neither is reachable from here: the host exposes OAuthModelAlias
+// only through StaticModelRequest (which a pure response interceptor never
+// receives), and it exposes no RPC for a provider plugin's model route or the
+// per-credential catalog. This handler therefore judges what it is given instead
+// of reading a cached listing.
 func handleAliasReport(body []byte) ([]byte, error) {
 	var req aliasReportRequest
 	if len(body) > 0 {
@@ -170,12 +171,23 @@ func handleAliasReport(body []byte) ([]byte, error) {
 			channels[trimmed] = true
 		}
 	}
-	snapshots := catalog.list()
-	if len(snapshots) == 0 {
+	upstream := make(map[string]upstreamListing, len(req.Upstream))
+	for provider, listing := range req.Upstream {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "" {
+			continue
+		}
+		upstream[provider] = listing
+	}
+	if len(channels) == 0 && len(upstream) == 0 {
+		// Neither a channel nor an upstream list means there is nothing to judge.
+		// Saying so beats an empty report that reads like "no problems found".
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{
-			"error":   "no_listing_captured",
-			"note":    "pull /v1/models from any client first, then reopen this report",
-			"reports": []aliasReport{},
+			"error": "nothing_to_compare",
+			"note":  "no alias channels and no upstream model lists were supplied",
+			"reports": []aliasReport{{
+				Channels: []string{}, Missing: []missingAliasRow{},
+			}},
 		}))
 	}
 	existing := make(map[string]map[string]bool, len(req.ExistingAliases))
@@ -192,18 +204,10 @@ func handleAliasReport(body []byte) ([]byte, error) {
 		}
 		existing[channel] = set
 	}
-	reports := make([]aliasReport, 0, len(snapshots))
-	for _, snapshot := range snapshots {
-		report := buildAliasReportWithAliasTable(
-			snapshot.Port, snapshot.Entries, channels, req.ModelProviders, existing)
-		// 报告读的是快照，不是实时的 /v1/models，所以必须让调用方看见它有多旧。
-		// 缺了这两个字段，"插件说 5 个模型、报告只列 4 个"就无从解释 —— 实际是
-		// 报告在读上一版快照（模型列表变了而没有人重新拉过一次）。
-		report.CapturedAt = snapshot.SeenAt
-		report.ListingCount = len(snapshot.Entries)
-		reports = append(reports, report)
-	}
-	return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{"reports": reports}))
+	report := buildAliasReport(channels, upstream, existing)
+	return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{
+		"reports": []aliasReport{report},
+	}))
 }
 
 // statusPayload reports the effective rule plus whether it is configured at all.

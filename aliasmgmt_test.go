@@ -9,26 +9,33 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-func TestAliasReportRouteServesTheOpenAIPort(t *testing.T) {
+func TestAliasReportRouteJudgesTheSuppliedUpstreamLists(t *testing.T) {
 	setManagementBasePath("/v0/management")
 	setResourceBasePath("/v0/resource/plugins/model-registry")
-	catalog.reset()
 
-	// Capture a listing the way real traffic would, then ask for the report.
-	loadPolicyConfig(t, "strategy: name\n")
-	headers := http.Header{"Authorization": {"Bearer any-key"}}
-	// Alphabetical, so the "name" strategy reproduces it and nothing changes.
-	body := ownedListingBody([][2]string{
-		{"anthropic/claude-opus-5.5", "cline"},
-		{"hy4-preview-x", "workbuddy"},
-		{"qoder-auto", "qoder"},
-		{"space-bunny", "workbuddy"},
+	reportBody, errMarshal := json.Marshal(map[string]any{
+		"channels": []string{"qoder", "workbuddy"},
+		// 上游名单由面板实时收集后送上。报告不看任何缓存快照，所以这个测试
+		// 也不需要先制造客户端流量。
+		"upstream": map[string]any{
+			"workbuddy": map[string]any{
+				"models": []string{"space-bunny", "hy4-preview-x"},
+				"origin": "plugin",
+			},
+			"qoder": map[string]any{
+				"models": []string{"auto", "qmodel_latest"},
+				"origin": "plugin",
+			},
+			// cline 有上游模型但没有渠道：要报在 no_channel 里。
+			"cline": map[string]any{
+				"models": []string{"x-ai/grok-4.7"},
+				"origin": "plugin",
+			},
+		},
+		"existing_aliases": map[string][]string{
+			"workbuddy": {"space-bunny", "workbuddy-space-bunny"},
+		},
 	})
-	if _, changed := governBody(portOpenAI, headers, body); changed {
-		t.Fatal("fixture should already be in the configured order")
-	}
-
-	reportBody, errMarshal := json.Marshal(map[string]any{"channels": []string{"qoder", "workbuddy"}})
 	if errMarshal != nil {
 		t.Fatalf("marshal: %v", errMarshal)
 	}
@@ -44,38 +51,35 @@ func TestAliasReportRouteServesTheOpenAIPort(t *testing.T) {
 		t.Fatalf("reports = %d, want 1", len(payload.Reports))
 	}
 	report := payload.Reports[0]
-	if report.Port != portOpenAI {
-		t.Errorf("port = %q, want %q", report.Port, portOpenAI)
-	}
-	// 三个都列出：qoder-auto 已带前缀因此带标记，两个 workbuddy 裸名不带。
+	// space-bunny 已有行，所以三个真缺口：hy4-preview-x + qoder 的两个。
 	if len(report.Missing) != 3 {
-		t.Fatalf("missing = %+v, want all three attributable models", report.Missing)
+		t.Fatalf("missing = %+v, want three rows", report.Missing)
 	}
 	for _, row := range report.Missing {
 		if row.Channel != "workbuddy" && row.Channel != "qoder" {
 			t.Errorf("channel = %q, want workbuddy or qoder", row.Channel)
 		}
-		// 别名一律是 <channel>-<原名>，即使原名已带前缀（那种情况由标记提示）。
 		if !strings.HasPrefix(row.Alias, row.Channel+"-") {
 			t.Errorf("alias %q is not prefixed with its channel %q", row.Alias, row.Channel)
 		}
 	}
-	// 三个列出：两个 workbuddy 裸名 + 一个带前缀的 qoder 名。
-	// 夹具里那个 cline 模型被跳过（channels 只传了 qoder/workbuddy，
-	// 显式列表是权威，cline 没有别名通道可写）。
-	if report.Ignored != 1 {
-		t.Errorf("ignored = %d, want 1 (the cline model has no channel here)", report.Ignored)
+	// cline 不在 channels 里，它的模型没有地方可写。
+	if len(report.NoChannel) != 1 || report.NoChannel[0].Channel != "cline" {
+		t.Errorf("no_channel = %+v, want one entry for cline", report.NoChannel)
+	}
+	// 表里已有行的那一个要记明原因。
+	if row, ok := skippedFor(report, "space-bunny"); !ok || row.Reason != reasonAlreadyAliased {
+		t.Errorf("space-bunny should be skipped as already aliased, got %+v/%v", row, ok)
 	}
 }
 
-// With no traffic captured the route must say so, rather than return an empty
-// report that reads like "no missing aliases found".
-func TestAliasReportRouteSaysWhenNothingCaptured(t *testing.T) {
+// 既没有渠道也没有上游名单时，必须说"无从比较"，而不是返回一份空报告 ——
+// 后者读起来像"没有缺失"。
+func TestAliasReportRouteSaysWhenThereIsNothingToCompare(t *testing.T) {
 	setManagementBasePath("/v0/management")
 	setResourceBasePath("/v0/resource/plugins/model-registry")
-	catalog.reset()
 
-	raw, errHandle := handleManagement(marshalWire(t, http.MethodGet, "/v0/management/plugins/model-registry/alias-report", nil))
+	raw, errHandle := handleManagement(marshalWire(t, http.MethodPost, "/v0/management/plugins/model-registry/alias-report", nil))
 	var payload struct {
 		Error   string        `json:"error"`
 		Reports []aliasReport `json:"reports"`
@@ -84,11 +88,8 @@ func TestAliasReportRouteSaysWhenNothingCaptured(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
-	if payload.Error != "no_listing_captured" {
-		t.Fatalf("error = %q, want no_listing_captured", payload.Error)
-	}
-	if len(payload.Reports) != 0 {
-		t.Errorf("reports should be empty, got %+v", payload.Reports)
+	if payload.Error != "nothing_to_compare" {
+		t.Fatalf("error = %q, want nothing_to_compare", payload.Error)
 	}
 }
 

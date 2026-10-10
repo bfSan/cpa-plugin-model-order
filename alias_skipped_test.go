@@ -20,39 +20,43 @@ func proposedFor(report aliasReport, model string) (missingAliasRow, bool) {
 	return missingAliasRow{}, false
 }
 
-// cline 的可见模型全是上游原名（cline-free/*、x-ai/grok-4.7）。它们此前被判为
+// cline 的上游原名带斜杠（cline-free/*、x-ai/grok-4.7）。它们此前被判为
 // "pass-through" 直接跳过，于是报告里一条 cline 建议都没有。
 //
 // 那个判定是错的：cline 是本部署的 provider，斜杠后面是 cline 下的来源，
 // 所以 cline-x-ai/grok-4.7、cline-cline-free/solar-mini4 都是合法别名。
 // 该不该加别名由操作者判断，插件只负责把清单摆出来。
 func TestClineModelsAreProposedNotSkipped(t *testing.T) {
-	entries := []catalogEntry{
-		{ID: "cline-free/mimo-v2.6-flash", OwnedBy: "cline"},
-		{ID: "cline-free/solar-mini4", OwnedBy: "cline"},
-		{ID: "x-ai/grok-4.7", OwnedBy: "cline"},
+	models := []string{
+		"cline-free/mimo-v2.6-flash",
+		"cline-free/solar-mini4",
+		"x-ai/grok-4.7",
 	}
-	report := buildAliasReportWithProviders("openai", entries, map[string]bool{"cline": true}, nil)
+	report := buildAliasReport(
+		map[string]bool{"cline": true},
+		map[string]upstreamListing{"cline": pluginUpstream(models...)},
+		nil,
+	)
 
-	if len(report.Missing) != len(entries) {
+	if len(report.Missing) != len(models) {
 		t.Fatalf("every cline model should be proposed, got %+v", report.Missing)
 	}
-	for _, entry := range entries {
-		row, ok := proposedFor(report, entry.ID)
+	for _, model := range models {
+		row, ok := proposedFor(report, model)
 		if !ok {
-			t.Fatalf("%s was not proposed", entry.ID)
+			t.Fatalf("%s was not proposed", model)
 		}
-		if row.Alias != "cline-"+entry.ID {
-			t.Fatalf("%s: alias = %q, want %q", entry.ID, row.Alias, "cline-"+entry.ID)
+		if row.Alias != "cline-"+model {
+			t.Fatalf("%s: alias = %q, want %q", model, row.Alias, "cline-"+model)
 		}
 		if row.Channel != "cline" {
-			t.Fatalf("%s: channel = %q, want cline", entry.ID, row.Channel)
+			t.Fatalf("%s: channel = %q, want cline", model, row.Channel)
 		}
 	}
 	// 既然都提议了，就不该再出现在跳过清单里 —— 两份清单必须互斥。
-	for _, entry := range entries {
-		if _, skipped := skippedFor(report, entry.ID); skipped {
-			t.Fatalf("%s was proposed and skipped at the same time", entry.ID)
+	for _, model := range models {
+		if _, skipped := skippedFor(report, model); skipped {
+			t.Fatalf("%s was proposed and skipped at the same time", model)
 		}
 	}
 	if report.Ignored != 0 {
@@ -60,11 +64,14 @@ func TestClineModelsAreProposedNotSkipped(t *testing.T) {
 	}
 }
 
-// 已经带 provider 前缀的名字同样照常提议。插件不做"这个名字看起来已经改好了"
-// 的判断：漏报会让操作者以为没有缺口，多报一行随时可以忽略。
+// 已经带 provider 前缀的上游名同样照常提议（除非表里已有行）。插件不做
+// "这个名字看起来已经改好了" 的判断：漏报会让操作者以为没有缺口，多报一行随时可以忽略。
 func TestPrefixedModelsAreStillProposed(t *testing.T) {
-	entries := []catalogEntry{{ID: "workbuddy-hy4-preview", OwnedBy: "workbuddy"}}
-	report := buildAliasReportWithProviders("openai", entries, map[string]bool{"workbuddy": true}, nil)
+	report := buildAliasReport(
+		map[string]bool{"workbuddy": true},
+		map[string]upstreamListing{"workbuddy": pluginUpstream("workbuddy-hy4-preview")},
+		nil,
+	)
 
 	row, ok := proposedFor(report, "workbuddy-hy4-preview")
 	if !ok {
@@ -75,50 +82,106 @@ func TestPrefixedModelsAreStillProposed(t *testing.T) {
 	}
 }
 
-// 没有 channel 要写时，原因必须具名，不能只累加计数。
-func TestNoChannelReasonIsNamed(t *testing.T) {
-	entries := []catalogEntry{{ID: "mystery-model", OwnedBy: "ghost"}}
-	report := buildAliasReportWithProviders("openai", entries, map[string]bool{"cline": true}, nil)
+// 读不到上游名单的渠道，原因必须具名，不能只累加计数。
+func TestNoUpstreamReasonIsNamed(t *testing.T) {
+	report := buildAliasReport(map[string]bool{"cline": true}, nil, nil)
 
 	if len(report.Missing) != 0 {
-		t.Fatalf("no channel means no row to write: %+v", report.Missing)
+		t.Fatalf("nothing readable means no row to write: %+v", report.Missing)
 	}
-	row, ok := skippedFor(report, "mystery-model")
+	row, ok := skippedFor(report, "")
 	if !ok {
-		t.Fatal("the skipped model must be listed with its reason")
+		t.Fatal("the unreadable channel must be listed with its reason")
 	}
-	if row.Reason != reasonNoChannel {
-		t.Fatalf("reason = %q, want %q", row.Reason, reasonNoChannel)
+	if row.Reason != reasonNoUpstream {
+		t.Fatalf("reason = %q, want %q", row.Reason, reasonNoUpstream)
 	}
-	if report.SkippedByReason[reasonNoChannel] != 1 {
+	if row.Provider != "cline" {
+		t.Fatalf("provider = %q, want cline", row.Provider)
+	}
+	if report.SkippedByReason[reasonNoUpstream] != 1 {
 		t.Fatalf("SkippedByReason = %v, want one entry", report.SkippedByReason)
 	}
 }
 
-// 没有 owned_by 也认不出 provider 时，原因要指名是"无 provider"。
-func TestNoProviderReasonIsNamed(t *testing.T) {
-	entries := []catalogEntry{{ID: "mystery-model"}}
-	report := buildAliasReportWithProviders("openai", entries, map[string]bool{"cline": true}, nil)
-	row, ok := skippedFor(report, "mystery-model")
+// 上游名单里出现空名字时，表里没有 `name` 可指向，只能具名跳过。
+func TestEmptyModelNameReasonIsNamed(t *testing.T) {
+	report := buildAliasReport(
+		map[string]bool{"workbuddy": true},
+		map[string]upstreamListing{"workbuddy": pluginUpstream("", "  ", "hy3")},
+		nil,
+	)
+
+	row, ok := skippedFor(report, "")
 	if !ok {
-		t.Fatal("no skip record for an unattributable model")
+		t.Fatal("an empty upstream name must be recorded, not silently dropped")
 	}
-	if row.Reason != reasonNoProvider {
-		t.Fatalf("reason = %q, want %q", row.Reason, reasonNoProvider)
+	if row.Reason != reasonNoModelName {
+		t.Fatalf("reason = %q, want %q", row.Reason, reasonNoModelName)
+	}
+	if row.Provider != "workbuddy" {
+		t.Fatalf("provider = %q, want workbuddy", row.Provider)
+	}
+	// 三条被服务的条目都参与判定（空名字也计入分母），所以 Captured=3；
+	// 其中两条被拒，Missing + Ignored == Captured 仍然成立。
+	if report.Captured != 3 {
+		t.Fatalf("Captured = %d, want 3", report.Captured)
+	}
+	if report.Ignored != 2 {
+		t.Fatalf("Ignored = %d, want 2 (the two blank names)", report.Ignored)
+	}
+	if _, ok := proposedFor(report, "hy3"); !ok {
+		t.Fatalf("the named model must still be proposed: %+v", report.Missing)
 	}
 }
 
-// Ignored 的语义是"没生成建议的模型数"，不按原因重复计数 —— 面板概要直接读它。
-func TestIgnoredStaysAModelCount(t *testing.T) {
-	entries := []catalogEntry{
-		{ID: "mystery-a"},
-		{ID: "mystery-b"},
+// Ignored 的语义是"参与判定但没生成建议的上游名数"，被隐藏的不计入 ——
+// 面板那行概要按 Missing + Ignored == Captured 读。
+func TestIgnoredStaysANameCount(t *testing.T) {
+	report := buildAliasReport(
+		map[string]bool{"workbuddy": true},
+		map[string]upstreamListing{
+			"workbuddy": {Models: []string{"a", "b"}, Hidden: []string{"c", "d"}, Origin: "plugin"},
+		},
+		nil,
+	)
+	// 两个被服务的都提议了，所以 Captured=2、Ignored=0。
+	if report.Captured != 2 {
+		t.Fatalf("Captured = %d, want 2", report.Captured)
 	}
-	report := buildAliasReportWithProviders("openai", entries, map[string]bool{"cline": true}, nil)
-	if report.Ignored != len(entries) {
-		t.Fatalf("Ignored = %d, want %d (one per model)", report.Ignored, len(entries))
+	if report.Ignored != 0 {
+		t.Fatalf("Ignored = %d, want 0: both served names produced a row", report.Ignored)
 	}
-	if report.Captured != len(entries) {
-		t.Fatalf("Captured = %d, want %d", report.Captured, len(entries))
+	// 两个隐藏的仍有记录，但不算进 Captured/Ignored。
+	if len(report.Skipped) != 2 {
+		t.Fatalf("Skipped = %+v, want the two hidden names", report.Skipped)
+	}
+	for _, name := range []string{"c", "d"} {
+		if row, ok := skippedFor(report, name); !ok || row.Reason != reasonHidden {
+			t.Fatalf("%s should be recorded as hidden, got %+v/%v", name, row, ok)
+		}
+	}
+}
+
+// 有上游模型但没有渠道时，整个 provider 只报一条，而不是把每个模型都变成一条抱怨。
+func TestNoChannelIsReportedOncePerProvider(t *testing.T) {
+	models := make([]string, 40)
+	for i := range models {
+		models[i] = "model-" + string(rune('a'+i%26))
+	}
+	report := buildAliasReport(
+		map[string]bool{},
+		map[string]upstreamListing{"openai": pluginUpstream(models...)},
+		nil,
+	)
+
+	if len(report.NoChannel) != 1 {
+		t.Fatalf("no_channel = %+v, want one entry for the provider", report.NoChannel)
+	}
+	if report.NoChannel[0].Served != len(models) {
+		t.Errorf("served = %d, want %d", report.NoChannel[0].Served, len(models))
+	}
+	if len(report.Skipped) != 0 {
+		t.Errorf("skipped = %+v, want none: no_channel is the reason, stated once", report.Skipped)
 	}
 }
