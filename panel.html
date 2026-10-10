@@ -108,6 +108,12 @@ ol.rules,ul.models{margin:0;padding:0;list-style:none}
 ul.models li{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed var(--border);min-width:0}
 ul.models li:last-child{border-bottom:0}
 ul.models li.pick{background:var(--acc-ring);border-radius:6px}
+/* A model hidden from the selected key. It stays in place so its position in the
+   order is still readable, and so "restore" has a row to act on. */
+ul.models li.denied{opacity:.45}
+ul.models li.denied .name{text-decoration:line-through}
+ul.models li.denied .flag{opacity:1}
+.chip.denied{color:var(--err);background:var(--err-soft);border-color:var(--err-border)}
 .flag{margin-left:auto;display:flex;gap:4px;opacity:0;transition:opacity .1s;flex:0 0 auto}
 ul.models li:hover .flag,li.pick .flag{opacity:1}
 table.alias-table{width:100%;border-collapse:collapse;font-size:12px}
@@ -263,12 +269,19 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
     <h2>预览 <span class="hint">用未保存的规则实时计算,排序与插件运行时同一套代码</span>
       <span class="spacer"></span><span class="chip" id="pvPort"></span></h2>
     <div class="bar">
-      <button class="mini" id="pvUp" title="上移选中项">↑</button>
-      <button class="mini" id="pvDown" title="下移选中项">↓</button>
-      <button class="mini" id="pvHome" title="移到最前">移顶</button>
-      <span class="hint">选中一行后可手工微调,再点顶部“按预览生成精确规则”</span>
+      <span class="hint">API Key</span>
+      <div class="chan-picker" id="keyPicker"></div>
+      <span class="spacer"></span>
+      <span class="chip" id="pvCount"></span>
+    </div>
+    <div class="bar">
+      <span class="hint">拖动手柄排序(或聚焦后按 ↑ / ↓);点“隐藏”把该模型从这个 Key 的列表移除,点“恢复”撤销。隐藏项保留在原位置灰显示,排序不受影响。</span>
+      <span class="spacer"></span>
+      <button class="primary" id="btnSaveVisibility" disabled>保存可见性</button>
+      <button id="btnRevertVisibility" disabled>放弃改动</button>
     </div>
     <div class="body"><ul class="models" id="preview"></ul></div>
+    <div class="note" id="pvNote"></div>
   </section>
 </main>
 
@@ -373,12 +386,24 @@ function toast(kind, msg){
 }
 
 /* ---- 状态 ---- */
-let state = { strategy: "grouped", caseSensitive: false, order: [], configured: false, suggestedOrder: [], catalogs: [] };
+let state = { strategy: "grouped", caseSensitive: false, order: [], configured: false, suggestedOrder: [], catalogs: [], fullCatalogs: [] };
 let port = "";
 let dirty = false;
 let previewIds = [];
 let previewSel = -1;
 let previewTimer = 0;
+
+/* ---- 可见性(按 API Key) ----
+   scope 是客户端 key 的 sha256,在浏览器算出来后才发给插件 —— key 原文既不出
+   浏览器,也不进插件。与已装的 key-model-access 面板同一套推导方式,所以两个
+   面板对同一个 key 得到的 scope 必然一致。 */
+let apiKeys = [];        // [{ key, scope, label }]
+let keyByScope = {};     // scope → apiKeys 条目
+let selectedScope = "";  // "" = 不限制(ALL 视角)
+let denyDrafts = {};     // scope → 已编辑未保存的 deny 列表
+let knownDeny = {};      // scope → 已保存的 deny 列表(用于脏检查与放弃改动)
+let deniedNow = new Set(); // 当前预览里被标灰的模型
+
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -402,15 +427,224 @@ async function load(){
   state.configured = !!d.configured;
   state.suggestedOrder = Array.isArray(d.suggested_order) ? d.suggested_order.slice() : [];
   state.catalogs = Array.isArray(d.catalogs) ? d.catalogs : [];
+  state.fullCatalogs = Array.isArray(d.full_catalogs) ? d.full_catalogs : [];
+  state.policies = Array.isArray(d.policies) ? d.policies : [];
   $("ver").textContent = "v" + (d.version || "?");
   if (!port || !state.catalogs.some(c => c.port === port)) {
     port = state.catalogs.length ? state.catalogs[0].port : "";
   }
+  adoptPolicies(d.policies);
   renderAll();
   markClean(state.configured);
   // 别名表直接来自 CPA，不依赖 catalog，所以打开面板就能读到。
   await loadAliases();
+  // 下游 Key 列表来自 CPA；拿不到不影响排序/别名（只影响按 key 预览）。
+  await loadAPIKeys();
 }
+
+// adoptPolicies 把插件已存的 access 策略读成「scope → deny 列表」的编辑基线。
+// allow_models 有意不进草稿：面板只做隐藏(deny)，白名单会让一个 key 的列表
+// 变成"只给这几个",误配一次就整屏消失,不适合做成点选。
+function adoptPolicies(policies){
+  knownDeny = {};
+  (policies || []).forEach(p => {
+    const scope = String(p && p.caller_scope || "").trim().toLowerCase();
+    if (!scope) return;
+    knownDeny[scope] = Array.isArray(p.deny_models) ? p.deny_models.map(String) : [];
+  });
+  // 未编辑过的 scope 沿用已存基线；已编辑的保留草稿，避免一次刷新丢掉未保存改动。
+  Object.keys(knownDeny).forEach(scope => {
+    if (!(scope in denyDrafts)) denyDrafts[scope] = knownDeny[scope].slice();
+  });
+}
+
+// sha256Hex 复刻 CPA 的 caller scope:
+//   sha256("cli-proxy-api:caller-scope:v1\0" + credential) → hex
+// 与插件 identity.go、以及 key-model-access 面板逐字节一致；三者不一致的话
+// 面板写的策略会对不上任何 key。
+async function sha256Hex(text){
+  const bytes = new TextEncoder().encode(text);
+  if (window.crypto && window.crypto.subtle) {
+    const digest = await window.crypto.subtle.digest("SHA-256", bytes);
+    return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
+  }
+  return sha256FallbackHex(bytes);
+}
+
+// sha256FallbackHex 是纯 JS SHA-256。非 localhost 的 HTTP 源没有 crypto.subtle,
+// 而 CPA 常被当远程面板用,所以这条兜底不是可选项。
+function sha256FallbackHex(bytes){
+  const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  let H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const len = bytes.length;
+  const bitLen = len * 8;
+  const total = ((len + 8) >> 6 << 6) + 64;
+  const buf = new Uint8Array(total);
+  buf.set(bytes);
+  buf[len] = 0x80;
+  // 长度是 64 位大端；JS 位运算只有 32 位，高位用除法算，避免 2^32 以上被截断。
+  const hi = Math.floor(bitLen / 4294967296);
+  const lo = bitLen >>> 0;
+  buf[total - 8] = (hi >>> 24) & 0xff; buf[total - 7] = (hi >>> 16) & 0xff;
+  buf[total - 6] = (hi >>> 8) & 0xff;  buf[total - 5] = hi & 0xff;
+  buf[total - 4] = (lo >>> 24) & 0xff; buf[total - 3] = (lo >>> 16) & 0xff;
+  buf[total - 2] = (lo >>> 8) & 0xff;  buf[total - 1] = lo & 0xff;
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  const w = new Uint32Array(64);
+  const dataview = new DataView(buf.buffer);
+  for (let off = 0; off < total; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dataview.getUint32(off + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >>> 3);
+      const s1 = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >>> 10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+    }
+    let [a,b,c,d,e,f,g,h] = H;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + t1) >>> 0;
+      d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    H = [(H[0]+a)>>>0,(H[1]+b)>>>0,(H[2]+c)>>>0,(H[3]+d)>>>0,
+         (H[4]+e)>>>0,(H[5]+f)>>>0,(H[6]+g)>>>0,(H[7]+h)>>>0];
+  }
+  return H.map(x => x.toString(16).padStart(8, "0")).join("");
+}
+
+// shortFingerprint 给 scope 一个人眼可辨的短标识。它不可逆，也不含 key 原文。
+function shortFingerprint(scope){
+  return String(scope || "").slice(0, 8);
+}
+
+// loadAPIKeys 读 CPA 现有的下游 Key,并在浏览器算好各自的 scope。
+async function loadAPIKeys(){
+  try {
+    const d = await call(MANAGEMENT_BASE_PATH + "/api-keys");
+    const list = (d && d["api-keys"]) || [];
+    const entries = [];
+    for (const raw of list) {
+      const key = String(raw || "").trim();
+      if (!key) continue;
+      const scope = await sha256Hex("cli-proxy-api:caller-scope:v1\0" + key);
+      entries.push({ key: key, scope: scope, label: shortFingerprint(scope) });
+    }
+    apiKeys = entries;
+    keyByScope = {};
+    entries.forEach(e => { keyByScope[e.scope] = e; });
+    if (selectedScope && !keyByScope[selectedScope]) selectedScope = "";
+    renderKeyPicker();
+    schedulePreview(0);
+  } catch (e) {
+    apiKeys = [];
+    keyByScope = {};
+    renderKeyPicker();
+    $("pvNote").textContent = "读不到 CPA 的 API Key 列表,按 Key 预览不可用: " + e.message;
+  }
+}
+
+function renderKeyPicker(){
+  const box = $("keyPicker");
+  if (!box) return;
+  const tabs = [`<span class="chan-tab${selectedScope === "" ? " on" : ""}" data-scope="">ALL(不限制)</span>`];
+  apiKeys.forEach(k => {
+    const denied = (denyDrafts[k.scope] || []).length;
+    tabs.push(`<span class="chan-tab${selectedScope === k.scope ? " on" : ""}" data-scope="${esc(k.scope)}" title="scope ${esc(k.scope)}">${esc(k.label)}${denied ? ` <span class="chan-count">隐藏 ${denied}</span>` : ""}</span>`);
+  });
+  if (!apiKeys.length) tabs.push(`<span class="hint">CPA 里没有 API Key</span>`);
+  box.innerHTML = tabs.join("");
+}
+
+// selection helpers for the tabs (kept out of the template so the click handler
+// has one owner).
+$("keyPicker").addEventListener("click", ev => {
+  const tab = ev.target.closest(".chan-tab");
+  if (!tab) return;
+  const scope = tab.dataset.scope || "";
+  if (scope && selectedScope !== scope && visibilityDirty(selectedScope)) {
+    if (!confirm("当前 Key 的可见性有未保存改动,切换会丢掉它们。继续?")) return;
+    denyDrafts[selectedScope] = (knownDeny[selectedScope] || []).slice();
+  }
+  selectedScope = scope;
+  previewSel = -1;
+  renderKeyPicker();
+  updateVisibilityButtons();
+  schedulePreview(0);
+});
+
+function visibilityDirty(scope){
+  if (!scope) return false;
+  const draft = denyDrafts[scope] || [];
+  const base = knownDeny[scope] || [];
+  if (draft.length !== base.length) return true;
+  const a = draft.slice().sort(), b = base.slice().sort();
+  return a.some((v, i) => v !== b[i]);
+}
+function anyVisibilityDirty(){
+  return Object.keys(denyDrafts).some(scope => visibilityDirty(scope));
+}
+function updateVisibilityButtons(){
+  const scoped = !!selectedScope;
+  const dirtyNow = scoped && visibilityDirty(selectedScope);
+  const save = $("btnSaveVisibility"), revert = $("btnRevertVisibility");
+  if (save) { save.disabled = !dirtyNow; save.title = scoped ? "" : "先选择一个 API Key"; }
+  if (revert) revert.disabled = !dirtyNow;
+}
+
+async function saveVisibility(){
+  if (!selectedScope) return;
+  const btn = $("btnSaveVisibility");
+  btn.disabled = true;
+  try {
+    await call(PLUGIN_CONFIG_PATH, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ access: buildAccessTable() })
+    });
+    knownDeny[selectedScope] = (denyDrafts[selectedScope] || []).slice();
+    renderKeyPicker();
+    updateVisibilityButtons();
+    toast("ok", "可见性已写入 config.yaml 并热更新");
+  } catch (e) {
+    toast("err", "保存可见性失败: " + e.message);
+  } finally {
+    updateVisibilityButtons();
+  }
+}
+
+// buildAccessTable 把草稿渲染成插件的 access 表。
+//
+// 已有的 label 与 allow_models 一律原样保留:面板不编辑它们,但 PATCH 是整体
+// 替换 access 这个键,丢掉就会静默清空别人写的白名单。
+function buildAccessTable(){
+  const out = [];
+  const scopes = new Set(Object.keys(denyDrafts).concat(Object.keys(knownDeny)));
+  scopes.forEach(scope => {
+    const deny = (denyDrafts[scope] || []).filter(s => String(s).trim());
+    const prior = (state.policies || []).find(p => String(p.caller_scope || "").toLowerCase() === scope);
+    const allow = (prior && Array.isArray(prior.allow_models)) ? prior.allow_models : [];
+    // 一条 deny 也没有且本来没有策略表项 → 不必凭空造一条空策略(空 scope 会被
+    // 插件丢弃,写它只会把配置弄脏)。
+    if (!deny.length && !prior) return;
+    const entry = { caller_scope: scope, deny_models: deny };
+    if (prior && prior.label) entry.label = prior.label;
+    if (allow.length) entry.allow_models = allow;
+    out.push(entry);
+  });
+  return out;
+}
+
 
 async function refreshModels(){
   const k = getModelKey();
@@ -574,43 +808,88 @@ async function renderPreview(){
   const box = $("preview");
   if (!cap.entries.length) { box.innerHTML = `<li class="empty">无模型数据</li>`; return; }
   let ordered;
+  let denied = [];
   try {
+    const body = { strategy: state.strategy, order: state.order, case_sensitive: state.caseSensitive, port };
+    if (selectedScope) {
+      // 选中某个 Key 时,预览要按它的策略算隐藏,并把「已编辑未保存」的 deny 一起
+      // 带上,否则操作者点隐藏后看不到反馈。
+      body.scope = selectedScope;
+      body.deny = denyDrafts[selectedScope] || [];
+    }
     const d = await call(API + "/preview", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ strategy: state.strategy, order: state.order, case_sensitive: state.caseSensitive, port })
+      body: JSON.stringify(body)
     });
     ordered = d.ordered || [];
+    denied = d.denied || [];
   } catch (e) {
     // 后端不可用时退回本地等价实现,保证编辑过程看得见结果
     ordered = sortIds(cap.entries.map(e => e.id), state.strategy, state.order, state.caseSensitive);
+    denied = selectedScope ? localDenied(cap.entries.map(e => e.id)) : [];
     if (getKey()) toast("err", "预览接口失败,已用本地计算: " + e.message);
   }
   previewIds = manualOrder.length
     ? manualOrder.filter(id => ordered.includes(id)).concat(ordered.filter(id => !manualOrder.includes(id)))
     : ordered;
+  deniedNow = new Set(denied);
   drawPreview();
 }
+
+// localDenied mirrors the plugin's deny matching for the offline fallback, so the
+// greyed rows do not disappear merely because the management API hiccuped.
+function localDenied(ids){
+  const patterns = denyDrafts[selectedScope] || [];
+  return ids.filter(id => patterns.some(p => testPattern(p, id, state.caseSensitive)));
+}
 let manualOrder = [];
+
+// drawPreview 渲染预览列表。
+//
+// 隐藏项不移动、不移除:它留在排序里的原位置,只加 .denied 置灰。理由是隐藏是
+// 「这个 Key 看不到」而不是「它不在排序里」,把它挪走会让操作者以为排序变了;
+// 而且它必须是可见的一行,「恢复」才有落点。
 function drawPreview(){
   const byId = {};
   currentCatalog().entries.forEach(e => { byId[e.id] = e; });
+  const canHide = !!selectedScope;
   $("preview").innerHTML = previewIds.map((id, i) => {
     const e = byId[id] || {};
-    return `<li class="${i === previewSel ? "pick" : ""}" data-i="${i}">
+    const hidden = deniedNow.has(id);
+    const cls = [i === previewSel ? "pick" : "", hidden ? "denied" : ""].filter(Boolean).join(" ");
+    const action = canHide
+      ? `<button class="mini" data-pv-act="${hidden ? "restore" : "hide"}" data-pv-id="${esc(id)}">${hidden ? "恢复" : "隐藏"}</button>`
+      : "";
+    return `<li class="${cls}" data-i="${i}" data-id="${esc(id)}">
+      <button type="button" class="drag-handle" data-pv-drag="${i}" aria-label="拖动第 ${i + 1} 项排序" title="拖动排序">⋮⋮</button>
       <span class="idx">${i + 1}</span><span class="name">${esc(id)}</span>
       ${e.owned_by ? `<span class="chip">${esc(e.owned_by)}</span>` : ""}
+      ${hidden ? `<span class="chip denied">已隐藏</span>` : ""}
+      <span class="flag">${action}</span>
     </li>`;
   }).join("");
+  const chip = $("pvCount");
+  if (chip) {
+    chip.textContent = selectedScope
+      ? `${previewIds.length} 个模型 · 该 Key 看不到 ${deniedNow.size} 个`
+      : `${previewIds.length} 个模型`;
+  }
+  updateVisibilityButtons();
 }
-function move(delta){
-  if (previewSel < 0) return;
-  const to = delta === "home" ? 0 : previewSel + delta;
-  if (to < 0 || to >= previewIds.length) return;
-  const id = previewIds.splice(previewSel, 1)[0];
-  previewIds.splice(to, 0, id);
-  previewSel = to;
-  manualOrder = previewIds.slice();
-  drawPreview();
+
+// setPreviewHidden 把一次隐藏/恢复写进草稿。它只改本地草稿,点「保存可见性」才落盘,
+// 这样误点可以放弃。
+function setPreviewHidden(id, hide){
+  if (!selectedScope) return;
+  const list = (denyDrafts[selectedScope] || []).slice();
+  // 精确到模型 ID 的一条 deny。用精确 ID 而不是通配:隐藏一个模型却顺手遮掉一族,
+  // 是这里最不该发生的意外。
+  const at = list.indexOf(id);
+  if (hide && at < 0) list.push(id);
+  if (!hide && at >= 0) list.splice(at, 1);
+  denyDrafts[selectedScope] = list;
+  renderKeyPicker();
+  schedulePreview(0);
 }
 
 /* ---- 模型别名：读 / 改 / 写 CPA 的 oauth-model-alias ---- */
@@ -1362,12 +1641,102 @@ $("btnCancelModelKey").addEventListener("click", hideModelKey);
 $("modelKeyInput").addEventListener("keydown", ev => { if (ev.key === "Enter") saveModelKey(); });
 
 $("preview").addEventListener("click", ev => {
+  const hideBtn = ev.target.closest("[data-pv-act]");
+  if (hideBtn) {
+    setPreviewHidden(hideBtn.dataset.pvId, hideBtn.dataset.pvAct === "hide");
+    return;
+  }
   const li = ev.target.closest("li"); if (!li || !li.dataset.i) return;
   previewSel = +li.dataset.i; drawPreview();
 });
-$("pvUp").addEventListener("click", () => move(-1));
-$("pvDown").addEventListener("click", () => move(1));
-$("pvHome").addEventListener("click", () => move("home"));
+
+/* 预览的拖拽排序。与规则列表同一套 pointer 事件,但预览的顺序是「生成规则」的
+   依据,所以拖动后写进 manualOrder 而不是 state.order —— 后者要等人点
+   「按预览生成精确规则」才覆盖。 */
+function movePreview(from, to){
+  if (from === to || from < 0 || to < 0 || from >= previewIds.length || to >= previewIds.length) return;
+  const [id] = previewIds.splice(from, 1);
+  previewIds.splice(to, 0, id);
+  previewSel = to;
+  manualOrder = previewIds.slice();
+  drawPreview();
+}
+
+let previewDrag = null;
+function clearPreviewDrop(){
+  $("preview").querySelectorAll("li").forEach(li => li.classList.remove("drop-before", "drop-after"));
+}
+function updatePreviewDrop(y){
+  if (!previewDrag) return;
+  const rows = [...$("preview").querySelectorAll("li")];
+  const row = rows.find(item => y < item.getBoundingClientRect().bottom) || rows[rows.length - 1];
+  if (!row) return;
+  const rect = row.getBoundingClientRect();
+  const before = y < rect.top + rect.height / 2;
+  const insertAt = Number(row.dataset.i) + (before ? 0 : 1);
+  previewDrag.to = insertAt > previewDrag.from ? insertAt - 1 : insertAt;
+  clearPreviewDrop();
+  if (previewDrag.to !== previewDrag.from) row.classList.add(before ? "drop-before" : "drop-after");
+}
+function scrollPreviewList(){
+  if (!previewDrag) return;
+  if (previewDrag.moved) {
+    const body = $("preview").parentElement;
+    const bounds = body.getBoundingClientRect();
+    const delta = previewDrag.y < bounds.top + 28 ? -14 : previewDrag.y > bounds.bottom - 28 ? 14 : 0;
+    if (delta) { body.scrollTop += delta; updatePreviewDrop(previewDrag.y); }
+  }
+  previewDrag.frame = requestAnimationFrame(scrollPreviewList);
+}
+function finishPreviewDrag(pointerId, commit){
+  if (!previewDrag || previewDrag.pointerId !== pointerId) return;
+  const {from, to, handle, frame, moved} = previewDrag;
+  previewDrag = null;
+  cancelAnimationFrame(frame);
+  if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+  $("preview").querySelectorAll("li").forEach(li => li.classList.remove("dragging"));
+  clearPreviewDrop();
+  // 没真的拖动就当作一次选中,避免「点一下手柄顺序就变了」。
+  if (!moved) return;
+  if (commit && to !== from) movePreview(from, to);
+  else drawPreview();
+}
+$("preview").addEventListener("pointerdown", ev => {
+  const handle = ev.target.closest("[data-pv-drag]");
+  if (!handle || previewDrag || (ev.pointerType === "mouse" && ev.button !== 0)) return;
+  const from = Number(handle.dataset.pvDrag);
+  previewDrag = {from, to: from, pointerId: ev.pointerId, handle, startY: ev.clientY, y: ev.clientY, moved: false, frame: 0};
+  handle.setPointerCapture(ev.pointerId);
+  handle.closest("li").classList.add("dragging");
+  previewDrag.frame = requestAnimationFrame(scrollPreviewList);
+  ev.preventDefault();
+});
+$("preview").addEventListener("pointermove", ev => {
+  if (!previewDrag || previewDrag.pointerId !== ev.pointerId) return;
+  previewDrag.y = ev.clientY;
+  if (Math.abs(ev.clientY - previewDrag.startY) > 4) previewDrag.moved = true;
+  if (previewDrag.moved) updatePreviewDrop(ev.clientY);
+});
+$("preview").addEventListener("pointerup", ev => finishPreviewDrag(ev.pointerId, true));
+$("preview").addEventListener("pointercancel", ev => finishPreviewDrag(ev.pointerId, false));
+$("preview").addEventListener("keydown", ev => {
+  const handle = ev.target.closest("[data-pv-drag]");
+  if (!handle || !["ArrowUp", "ArrowDown"].includes(ev.key)) return;
+  ev.preventDefault();
+  const from = Number(handle.dataset.pvDrag);
+  const to = Math.max(0, Math.min(previewIds.length - 1, from + (ev.key === "ArrowUp" ? -1 : 1)));
+  movePreview(from, to);
+  $("preview").querySelector(`[data-pv-drag="${to}"]`)?.focus();
+});
+
+$("btnSaveVisibility").addEventListener("click", saveVisibility);
+$("btnRevertVisibility").addEventListener("click", () => {
+  if (!selectedScope) return;
+  denyDrafts[selectedScope] = (knownDeny[selectedScope] || []).slice();
+  renderKeyPicker();
+  schedulePreview(0);
+  toast("ok", "已放弃该 Key 的可见性改动");
+});
 
 $("btnAliasLoad").addEventListener("click", loadAliases);
 $("btnAliasSave").addEventListener("click", saveAliases);

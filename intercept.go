@@ -42,6 +42,15 @@ func governBody(sourceFormat string, headers http.Header, body []byte) ([]byte, 
 	port := portFor(sourceFormat, readCatalogEntries(list.elements))
 	changed := false
 
+	// The pre-filter catalog is recorded separately from the one the callers see.
+	//
+	// catalog.record below stores what this caller was served, which is the right
+	// thing to display but the wrong thing to edit visibility against: once a model
+	// is denied it stops appearing here, so the panel would lose the row and with it
+	// the only way to un-deny it. fullCatalog keeps CPA's own pre-policy listing, so
+	// a denied model stays listed and restorable.
+	fullCatalog.record(port, readCatalogEntries(list.elements))
+
 	if policy, ok := resolvePolicy(headers, port); ok {
 		kept := make([][]byte, 0, len(list.elements))
 		for _, element := range list.elements {

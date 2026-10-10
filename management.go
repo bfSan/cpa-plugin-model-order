@@ -214,6 +214,10 @@ func statusPayload() map[string]any {
 		"policies":        policies,
 		"policy_count":    cfg.access.count,
 		"catalogs":        catalog.list(),
+		// full_catalogs is the pre-policy listing. The panel's per-key view has to
+		// offer a model the operator already denied, or the deny could never be
+		// undone; catalogs above no longer contains those rows.
+		"full_catalogs": fullCatalog.list(),
 	}
 }
 
@@ -227,6 +231,18 @@ type previewRequest struct {
 	// IDs overrides the captured list, which lets the panel preview a rule
 	// against a hand written set.
 	IDs []string `json:"ids"`
+	// Scope previews the listing as one caller sees it. Empty means "no key
+	// selected", which previews the unrestricted listing.
+	//
+	// It is a plain sha256 digest, never a credential: the panel derives it in the
+	// browser (the same way key-model-access does) so the API key itself never
+	// reaches this plugin.
+	Scope string `json:"scope"`
+	// Deny/Allow override the policy stored for Scope, so the panel can preview a
+	// hide the operator has not saved yet. When both are nil the stored policy is
+	// used as-is.
+	Deny  *[]string `json:"deny"`
+	Allow *[]string `json:"allow"`
 }
 
 func handlePreview(body []byte) ([]byte, error) {
@@ -245,7 +261,16 @@ func handlePreview(body []byte) ([]byte, error) {
 				port = listed[0].Port
 			}
 		}
-		if snapshot, ok := catalog.get(port); ok {
+		// A scoped preview reads the pre-policy catalog: the caller-visible one
+		// no longer holds the models this key denied, so previewing against it
+		// could never show a denied row as restorable.
+		store := &catalog
+		if strings.TrimSpace(req.Scope) != "" {
+			store = &fullCatalog
+		}
+		if snapshot, ok := store.get(port); ok {
+			ids = idsFromEntries(snapshot.Entries)
+		} else if snapshot, ok := catalog.get(port); ok {
 			ids = idsFromEntries(snapshot.Entries)
 		}
 	}
@@ -269,6 +294,20 @@ func handlePreview(body []byte) ([]byte, error) {
 	matchers := compileMatchers(order, req.CaseSensitive)
 	less := comparer(strategy, matchers, req.CaseSensitive)
 
+	// denied reports the ids the selected key cannot see. The ids stay in
+	// `ordered` regardless: the panel renders them greyed in place so the operator
+	// can restore one, and a preview that simply dropped them would hide the only
+	// path back.
+	denied := map[string]bool{}
+	policy := previewPolicy(req, port)
+	if policy != nil {
+		for _, id := range ids {
+			if !policy.allows(id) {
+				denied[id] = true
+			}
+		}
+	}
+
 	ordered := append([]string(nil), ids...)
 	sortIDs(ordered, less)
 
@@ -276,11 +315,49 @@ func handlePreview(body []byte) ([]byte, error) {
 	for _, id := range ordered {
 		matched[id] = matchedPattern(id, matchers, req.CaseSensitive)
 	}
+	deniedIDs := make([]string, 0, len(denied))
+	for _, id := range ordered {
+		if denied[id] {
+			deniedIDs = append(deniedIDs, id)
+		}
+	}
 	return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{
 		"port":    port,
 		"ordered": ordered,
 		"matched": matched,
+		"denied":  deniedIDs,
+		"scoped":  strings.TrimSpace(req.Scope) != "",
 	}))
+}
+
+// previewPolicy builds the visibility rule a scoped preview should apply.
+//
+// The panel sends the deny list it is editing, so an unsaved hide is visible
+// before it is written; the stored policy for that scope fills in what the panel
+// did not send. A preview with no scope is unrestricted, which is what makes
+// "no key selected" show the whole listing.
+//
+// port matters: filtering only runs on the ports filterPort accepts. A preview
+// that marked models denied on the Claude port would show an operator a hide the
+// runtime never applies.
+func previewPolicy(req previewRequest, port string) *accessPolicy {
+	scope := strings.TrimSpace(req.Scope)
+	if scope == "" || !filterPort(port) {
+		return nil
+	}
+	policy := &accessPolicy{CallerScope: scope}
+	if stored, ok := currentConfig().access.lookup(scope); ok {
+		policy.CaseSensitive = stored.CaseSensitive
+		policy.AllowModels = append([]string(nil), stored.AllowModels...)
+		policy.DenyModels = append([]string(nil), stored.DenyModels...)
+	}
+	if req.Allow != nil {
+		policy.AllowModels = append([]string(nil), (*req.Allow)...)
+	}
+	if req.Deny != nil {
+		policy.DenyModels = append([]string(nil), (*req.Deny)...)
+	}
+	return policy
 }
 
 func idsFromEntries(entries []catalogEntry) []string {

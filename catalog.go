@@ -47,6 +47,12 @@ type catalogStore struct {
 
 var catalog catalogStore
 
+// fullCatalog records the listing CPA produced BEFORE any access policy ran, per
+// port. It exists for the visibility editor: catalog above holds what a caller was
+// served, so a denied model disappears from it and could never be offered back.
+// Only the panel's per-key view reads this store; routing decisions never do.
+var fullCatalog catalogStore
+
 func (s *catalogStore) record(port string, entries []catalogEntry) {
 	snapshot := catalogSnapshot{
 		Port:    port,
