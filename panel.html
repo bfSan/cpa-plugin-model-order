@@ -58,20 +58,17 @@ header h1{font-size:16px;margin:0;font-weight:600}
 .actions{grid-column:1/-1;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 #btnSave{min-width:120px}
 .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;grid-column:1/-1}
-main{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:14px;padding:16px;max-width:1500px;margin:0 auto}
-/* 排序规则与预览必须同列相邻：规则只影响下面的预览，不影响右侧的「实际下发」。
-   放在同一列、上下紧挨，因果关系才看得出来；早期左规则/右模型并排的布局会被读成
-   「规则作用于右边那个列表」。 */
-/* 四张卡片都写死了行号,自动放置的 .actions 会被挤到这些显式行之后(页面最底部)。
-   所以 .actions 也必须显式占第 1 行,卡片整体顺延一行。 */
-.actions{grid-column:1/-1;grid-row:1}
-.card-full{grid-column:1/-1;grid-row:2}
+main{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;padding:16px;max-width:1500px;margin:0 auto}
+/* 单列版式:操作栏 → 模型别名 → 排序规则 → 模型。
+   排序规则紧挨在模型列表上面,因为规则只作用于那张列表,上下相邻才看得出因果。
+   早先是「左规则 | 右实际下发」并排,读起来像规则在管右边那张表;而右边那张和
+   预览本就是同一份数据的副本(0.9.0 合并掉了),并排还让重复内容占了半屏。
+   两张卡都写死了行号,自动放置的 .actions 会被挤到它们之后(页面最底部),所以
+   .actions 也显式占第 1 行。 */
+.actions{grid-column:1;grid-row:1}
+.card-full{grid-column:1;grid-row:2}
 .card-rules{grid-column:1;grid-row:3}
-.card-models{grid-column:2;grid-row:3/span 2}
 .card-preview{grid-column:1;grid-row:4}
-@media (max-width:980px){main{grid-template-columns:minmax(0,1fr)}
-  /* 单列时清掉全部显式定位,否则 grid-row:3/span 2 会造出隐式第二列,把版面撑歪。 */
-  .actions,.card-full,.card-rules,.card-models,.card-preview{grid-column:1/-1;grid-row:auto}}
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);
   overflow:hidden;display:flex;flex-direction:column;min-width:0}
 .card>h2{margin:0;padding:12px 14px;font-size:14px;font-weight:600;border-bottom:1px solid var(--border);
@@ -264,15 +261,16 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
     </div>
     <div class="body"><ol class="rules" id="rules"></ol></div>
     <div class="note">每条规则各成一桶,桶内按模型 ID 字母序。未命中任何规则的模型排在最后,同样按字母序。
-      <b>这些规则排序的是下方「预览」</b>,不改变右侧「CPA 实际下发的模型」里的原始列表(那里只记录各端口真切收到的 ID,按 ID 排列)。</div>
+      <b>这些规则排序的就是下方那张模型列表</b>,它同时也是各端口真实收到的 ID 清单 —— 两者已合并,不再有第二份副本。</div>
   </section>
-  <section class="card card-models">
-    <h2>CPA 实际下发的模型 <span class="hint" id="capHint"></span></h2>
+  <section class="card card-preview">
+    <h2>模型 <span class="hint">按上方排序规则实时计算(含未保存的改动),与插件运行时同一套代码</span>
+      <span class="spacer"></span><span class="chip" id="capHint"></span></h2>
     <div class="bar">
-      <select id="port"></select>
+      <select id="port" title="CPA 端口:各端口收到的 ID 集合不同"></select>
       <input type="search" class="grow" id="filter" placeholder="筛选模型 ID">
       <span class="chip" id="cnt"></span>
-      <button id="btnRefreshModels" title="用下游 API Key 重新拉取 OpenAI 模型列表">刷新列表</button>
+      <button class="mini" id="btnRefreshModels" title="用下游 API Key 重新拉取 OpenAI 模型列表">刷新列表</button>
       <button class="mini" id="btnChangeModelKey" title="更换用于刷新列表的下游 API Key">更换 Key</button>
       <div class="key-gate" id="modelKeyGate">
         <input type="password" class="grow" id="modelKeyInput" placeholder="下游 API Key" autocomplete="off">
@@ -280,12 +278,6 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
         <button class="mini" id="btnCancelModelKey">取消</button>
       </div>
     </div>
-    <div class="body"><ul class="models" id="models"></ul></div>
-    <div class="note">这里列出的是各端口真实收到的 ID。Anthropic 端口是伪装名,想单独控制它就直接点右侧的“精确”,把伪装 ID 写成规则。</div>
-  </section>
-  <section class="card card-preview">
-    <h2>预览 <span class="hint">排序结果只在这里体现:用未保存的规则实时计算,排序与插件运行时同一套代码</span>
-      <span class="spacer"></span><span class="chip" id="pvPort"></span></h2>
     <div class="bar">
       <span class="hint">API Key</span>
       <div class="chan-picker" id="keyPicker"></div>
@@ -293,13 +285,15 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
       <span class="chip" id="pvCount"></span>
     </div>
     <div class="bar">
-      <span class="hint">拖动手柄排序(或聚焦后按 ↑ / ↓);点“隐藏”把该模型从这个 Key 的列表移除,点“恢复”撤销。隐藏项保留在原位置灰显示,排序不受影响。<b>隐藏按 API Key 生效:先在上面选一个 Key 再点“隐藏”;ALL(不限制) 视角下按钮为禁用态。</b></span>
+      <span class="hint">拖动手柄排序(或聚焦后按 ↑ / ↓)。点“隐藏”把该模型从这个 Key 的列表移除,点“恢复”撤销。隐藏项保留在原位置灰显示,排序不受影响。<b>隐藏按 API Key 生效:先选一个 Key;ALL(不限制) 视角下按钮为禁用态。</b></span>
       <span class="spacer"></span>
       <button class="primary" id="btnSaveVisibility" disabled>保存可见性</button>
       <button id="btnRevertVisibility" disabled>放弃改动</button>
     </div>
     <div class="body"><ul class="models" id="preview"></ul></div>
-    <div class="note" id="pvNote"></div>
+    <div class="note" id="pvNote">
+      用未保存的规则实时计算,排序与插件运行时同一套代码。Anthropic 端口是伪装名,想单独控制它就点某一行的“精确”,把伪装 ID 写成规则。
+    </div>
   </section>
 </main>
 
@@ -704,7 +698,6 @@ function renderAll(){
   $("cs").checked = state.caseSensitive;
   renderPorts();
   renderRules();
-  renderModels();
   schedulePreview(0);
 }
 
@@ -714,7 +707,6 @@ function renderPorts(){
   if (port) sel.value = port;
   const cap = state.catalogs.find(c => c.port === port);
   $("capHint").textContent = cap ? `捕获于 ${new Date(cap.seen_at).toLocaleTimeString()}` : "尚无捕获";
-  $("pvPort").textContent = port ? "端口 " + port : "无数据";
 }
 
 function currentCatalog(){ return state.catalogs.find(c => c.port === port) || { entries: [] }; }
@@ -744,32 +736,6 @@ function renderRules(){
       <input type="text" class="grow" value="${esc(p)}" data-i="${i}">
       <span class="match-count" title="当前端口">匹配 ${hits} 个模型</span>
       <button class="mini" data-act="del" data-i="${i}">删</button>
-    </li>`;
-  }).join("");
-}
-
-function renderModels(){
-  const q = $("filter").value.trim().toLowerCase();
-  const entries = currentCatalog().entries.filter(e => !q || e.id.toLowerCase().includes(q));
-  $("cnt").textContent = entries.length + " / " + (currentCatalog().count || 0);
-  const box = $("models");
-  if (!entries.length) {
-    const captured = state.catalogs.some(c => c.port === port);
-    box.innerHTML = captured
-      ? `<li class="empty">当前 API Key 没有可用模型。</li>`
-      : `<li class="empty">先用任一客户端拉一次模型列表,插件会在此处记下 CPA 真实下发的 ID。</li>`;
-    return;
-  }
-  box.innerHTML = entries.map(e => {
-    const hit = firstRule(e.id);
-    return `<li data-id="${esc(e.id)}">
-      <span class="name">${esc(e.id)}</span>
-      ${e.owned_by ? `<span class="chip">${esc(e.owned_by)}</span>` : ""}
-      <span class="chip ${hit ? "hit" : "none"}">${hit ? esc(hit) : "未分组"}</span>
-      <span class="flag">
-        <button class="mini" data-act="exact" data-id="${esc(e.id)}" title="按这个 ID 建精确规则">精确</button>
-        <button class="mini" data-act="prefix" data-id="${esc(e.id)}" title="取 provider 前缀建通配规则">前缀</button>
-      </span>
     </li>`;
   }).join("");
 }
@@ -865,7 +831,32 @@ function drawPreview(){
   const byId = {};
   currentCatalog().entries.forEach(e => { byId[e.id] = e; });
   const canHide = !!selectedScope;
-  $("preview").innerHTML = previewIds.map((id, i) => {
+  // 筛选只影响「画哪些行」,不影响顺序语义:data-i 仍然是 previewIds 里的全局下标,
+  // 拖拽和键盘上下移动都按全局下标走。若按筛选后的子集编下标,过滤状态下拖一行会
+  // 移动错误的模型 —— 这是把右侧列表并进来时才出现的耦合。
+  const q = ($("filter").value || "").trim().toLowerCase();
+  const shown = previewIds.map((id, i) => ({id, i}))
+    .filter(row => !q || row.id.toLowerCase().includes(q));
+  const total = currentCatalog().count || previewIds.length;
+  $("cnt").textContent = q ? `${shown.length} / ${previewIds.length} 个匹配` : `${previewIds.length} / ${total}`;
+  if (!previewIds.length) {
+    const captured = state.catalogs.some(c => c.port === port);
+    $("preview").innerHTML = `<li class="empty">${captured
+      ? "当前端口没有可用模型。"
+      : "先用任一客户端拉一次模型列表,插件会在此处记下 CPA 真实下发的 ID。"}</li>`;
+    const emptyChip = $("pvCount");
+    if (emptyChip) emptyChip.textContent = "";
+    updateVisibilityButtons();
+    return;
+  }
+  if (!shown.length) {
+    $("preview").innerHTML = `<li class="empty">没有匹配「${esc(q)}」的模型。</li>`;
+    const noMatchChip = $("pvCount");
+    if (noMatchChip) noMatchChip.textContent = `0 / ${previewIds.length} 个匹配`;
+    updateVisibilityButtons();
+    return;
+  }
+  $("preview").innerHTML = shown.map(({id, i}) => {
     const e = byId[id] || {};
     const hidden = deniedNow.has(id);
     const cls = [i === previewSel ? "pick" : "", hidden ? "denied" : ""].filter(Boolean).join(" ");
@@ -875,8 +866,7 @@ function drawPreview(){
     const action = canHide
       ? `<button class="mini" data-pv-act="${hidden ? "restore" : "hide"}" data-pv-id="${esc(id)}">${hidden ? "恢复" : "隐藏"}</button>`
       : `<button class="mini" disabled title="隐藏是按 API Key 生效的:先在上方选一个 Key 再操作">隐藏</button>`;
-    // 分组标签与右侧「实际下发」用同一套 firstRule,两个窗口对同一个模型给出
-    // 相同结论;否则预览里看不出这条模型归了哪组,得回头去右边的窗口找。
+    // 分组标签复用 firstRule,与规则列表对同一个模型给出相同结论。
     // 「纯字母序」模式下规则不参与排序,这时挂分组标签等于暗示一个不存在的分组,
     // 所以只在分组模式显示。
     const grouped = state.strategy !== "name";
@@ -887,14 +877,19 @@ function drawPreview(){
       ${e.owned_by ? `<span class="chip">${esc(e.owned_by)}</span>` : ""}
       ${grouped ? `<span class="chip ${hit ? "hit" : "none"}">${hit ? esc(hit) : "未分组"}</span>` : ""}
       ${hidden ? `<span class="chip denied">已隐藏</span>` : ""}
-      <span class="flag">${action}</span>
+      <span class="flag">
+        <button class="mini" data-act="exact" data-id="${esc(id)}" title="按这个 ID 建精确规则">精确</button>
+        <button class="mini" data-act="prefix" data-id="${esc(id)}" title="取 provider 前缀建通配规则">前缀</button>
+        ${action}
+      </span>
     </li>`;
   }).join("");
   const chip = $("pvCount");
   if (chip) {
-    chip.textContent = selectedScope
-      ? `${previewIds.length} 个模型 · 该 Key 看不到 ${deniedNow.size} 个`
-      : `${previewIds.length} 个模型 · 隐藏需先选一个 Key`;
+    const scopeNote = selectedScope
+      ? `该 Key 看不到 ${deniedNow.size} 个`
+      : "隐藏需先选一个 Key";
+    chip.textContent = `${previewIds.length} 个模型 · ${scopeNote}`;
     chip.title = selectedScope
       ? `当前按 ${selectedScope} 计算可见性`
       : "ALL(不限制) 视角:这里只预览排序结果。隐藏是按 API Key 单独记录的,先选一个 Key 才能隐藏。";
@@ -1767,14 +1762,14 @@ $("rules").addEventListener("click", ev => {
   const i = +b.dataset.i, act = b.dataset.act;
   if (act !== "del") return;
   state.order.splice(i, 1);
-  markDirty(); renderRules(); renderModels(); schedulePreview(0);
+  markDirty(); renderRules(); schedulePreview(0);
 });
 
 function moveRule(from, to){
   if (from === to || from < 0 || to < 0 || from >= state.order.length || to >= state.order.length) return;
   const [rule] = state.order.splice(from, 1);
   state.order.splice(to, 0, rule);
-  markDirty(); renderRules(); renderModels(); schedulePreview(0);
+  markDirty(); renderRules(); schedulePreview(0);
 }
 
 let ruleDrag = null;
@@ -1840,16 +1835,17 @@ $("rules").addEventListener("keydown", ev => {
   $("rules").querySelector(`.drag-handle[data-i="${to}"]`)?.focus();
 });
 
-$("models").addEventListener("click", ev => {
-  const b = ev.target.closest("button"); if (!b) return;
-  const id = b.dataset.id;
-  const rule = b.dataset.act === "exact" ? id : (id.split("-")[0] + "-*");
+// 「精确 / 前缀」把某一行转成一条排序规则。它原来挂在被合并掉的「实际下发」列表上,
+// 现在跟着模型行走,是列表里唯一会写 state.order 的按钮。
+function addRuleFromModel(act, id){
+  const rule = act === "exact" ? id : (id.split("-")[0] + "-*");
   if (state.order.includes(rule)) { toast("", "规则已存在: " + rule); return; }
   state.order.push(rule);
-  markDirty(); renderRules(); renderModels(); schedulePreview(0);
+  markDirty(); renderRules(); schedulePreview(0);
   toast("ok", "已加规则 " + rule);
-});
-$("filter").addEventListener("input", () => renderModels());
+}
+
+$("filter").addEventListener("input", () => drawPreview());
 $("port").addEventListener("change", ev => { port = ev.target.value; manualOrder = []; previewSel = -1; renderAll(); });
 $("btnRefreshModels").addEventListener("click", refreshModels);
 $("btnChangeModelKey").addEventListener("click", showModelKey);
@@ -1858,6 +1854,8 @@ $("btnCancelModelKey").addEventListener("click", hideModelKey);
 $("modelKeyInput").addEventListener("keydown", ev => { if (ev.key === "Enter") saveModelKey(); });
 
 $("preview").addEventListener("click", ev => {
+  const ruleBtn = ev.target.closest("[data-act]");
+  if (ruleBtn) { addRuleFromModel(ruleBtn.dataset.act, ruleBtn.dataset.id); return; }
   const hideBtn = ev.target.closest("[data-pv-act]");
   if (hideBtn) {
     setPreviewHidden(hideBtn.dataset.pvId, hideBtn.dataset.pvAct === "hide");

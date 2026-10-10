@@ -265,10 +265,12 @@ func TestPanelCanRefreshCapturedOpenAIModelsWithoutLosingDraft(t *testing.T) {
 	}
 }
 
+// 规则行的渲染区段。结束标记用匹配语义那段注释 —— 早先这里指向 renderModels(),
+// 但 0.9.0 把「实际下发的模型」并进了预览,那个函数已经不存在了。
 func TestRuleRowsUseDragOrderingAndLabeledMatchCounts(t *testing.T) {
 	html := renderPanel()
 	start := strings.Index(html, "function renderRules()")
-	end := strings.Index(html, "function renderModels()")
+	end := strings.Index(html, "\n/* ---- 与插件同款匹配语义")
 	if start < 0 || end <= start {
 		t.Fatal("rule renderer not found")
 	}

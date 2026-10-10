@@ -107,10 +107,16 @@ func TestPreviewKeepsDeniedModelsListedAndRestorable(t *testing.T) {
 			t.Fatalf("drawPreview is missing %q", want)
 		}
 	}
-	// Denied rows are rendered from the same previewIds array as the others, so
-	// they keep their position rather than being appended or dropped.
-	if !strings.Contains(draw, "previewIds.map((id, i) => {") {
+	// Denied rows are rendered from the same previewIds sequence as the others, so
+	// they keep their position rather than being appended or dropped. 0.9.0 合并列表
+	// 后渲染改成「先配全局下标、再按筛选取子集」,所以钉的是那一步,不是老的
+	// previewIds.map 直调。
+	if !strings.Contains(draw, "const shown = previewIds.map((id, i) => ({id, i}))") {
 		t.Fatal("drawPreview must render every id in order, including denied ones")
+	}
+	// 隐藏项不得被筛选顺带丢掉:筛选只按 id 匹配,deny 是另一回事。
+	if strings.Contains(draw, "deniedNow.has(row.id)") {
+		t.Fatal("hidden rows must not be dropped by the filter; they stay in place, greyed")
 	}
 }
 
@@ -148,9 +154,9 @@ func TestPreviewShowsTheSameGroupChipAsTheModelsList(t *testing.T) {
 	}
 }
 
-// 排序规则只作用于预览。布局必须让这句话自己成立:规则与预览同列上下相邻,否则
-// 并排的「规则 | 实际下发」会被读成「规则作用于右边那个列表」。
-func TestOrderRulesSitInTheSameColumnAsThePreview(t *testing.T) {
+// 排序规则只作用于模型列表,布局必须让这句话自己成立:规则紧贴在列表上面。
+// 早先是「左规则 | 右实际下发」并排,被读成「规则作用于右边那张表」。
+func TestOrderRulesSitDirectlyAboveTheModelList(t *testing.T) {
 	html := renderPanel()
 	for _, want := range []string{
 		".card-rules{grid-column:1;grid-row:3}",
@@ -160,23 +166,69 @@ func TestOrderRulesSitInTheSameColumnAsThePreview(t *testing.T) {
 			t.Fatalf("panel layout is missing %q", want)
 		}
 	}
-	// 右侧那张只占第 2 列,不能横跨到规则的列上。
-	if !strings.Contains(html, ".card-models{grid-column:2;grid-row:3/span 2}") {
-		t.Fatal("the actual-models card must stay in column 2")
-	}
-	// 显式行号会让自动放置的元素(操作栏、跨列的别名卡)掉到所有卡片之后,
-	// 所以它们也必须显式定位。
+	// 显式行号会让自动放置的元素(操作栏)掉到所有卡片之后,所以它也要显式定位。
 	for _, want := range []string{
-		".actions{grid-column:1/-1;grid-row:1}",
-		".card-full{grid-column:1/-1;grid-row:2}",
+		".actions{grid-column:1;grid-row:1}",
+		".card-full{grid-column:1;grid-row:2}",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("explicit rows pushed %q out of place; it needs its own row", want)
 		}
 	}
-	// 单列时必须清掉全部显式定位,否则 span 会造出隐式第二列。
-	if !strings.Contains(html, ".actions,.card-full,.card-rules,.card-models,.card-preview{grid-column:1/-1;grid-row:auto}") {
-		t.Fatal("the single-column media query must reset every explicit grid placement")
+}
+
+// 「CPA 实际下发的模型」与预览读的是同一份 currentCatalog(),两栏并排等于把同一份
+// 数据画两遍,还把采集入口(刷新/换 Key/端口)埋进了看起来冗余的那张卡里。0.9.0 合并
+// 成一张列表:采集入口与「精确/前缀」都跟着模型行走。这里钉住合并结果 —— 旧的
+// 第二张卡、它的列表容器和渲染函数都不许回来。
+func TestTheCapturedModelsListIsMergedIntoTheSingleModelList(t *testing.T) {
+	html := renderPanel()
+	for _, gone := range []string{
+		`id="models"`,
+		`function renderModels()`,
+		".card-models{",
+		`id="pvPort"`,
+	} {
+		if strings.Contains(html, gone) {
+			t.Fatalf("the merged-away second list still ships %q", gone)
+		}
+	}
+	// 采集入口必须还在,否则合并会把「刷新列表 / 更换 Key / 端口」一起吃掉。
+	for _, want := range []string{
+		`id="btnRefreshModels"`,
+		`id="btnChangeModelKey"`,
+		`id="port"`,
+		`id="filter"`,
+		`id="cnt"`,
+		`id="capHint"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("merging the lists dropped the capture control %q", want)
+		}
+	}
+	// 「精确/前缀」原来挂在被合并的那张列表上,现在必须由模型列表自己处理。
+	if !strings.Contains(html, "function addRuleFromModel(") {
+		t.Fatal("the exact/prefix rule buttons lost their handler in the merge")
+	}
+	if !strings.Contains(html, `$("preview").addEventListener("click", ev => {`) {
+		t.Fatal("the model list must handle its own clicks after the merge")
+	}
+}
+
+// 筛选与拖拽共存在一张列表上,下标语义必须一致:data-i 始终是 previewIds 里的全局
+// 下标。若按筛选后的子集编下标,过滤状态下拖一行会移动错误的模型。
+func TestFilteringKeepsGlobalDragIndices(t *testing.T) {
+	draw := panelSection(t, "function drawPreview()", "\n// setPreviewHidden")
+	// 先按 id 保留原下标,再过滤 —— 顺序反了就会丢掉全局下标。
+	if !strings.Contains(draw, ".map((id, i) => ({id, i}))") {
+		t.Fatal("drawPreview must pair each id with its global index before filtering")
+	}
+	if !strings.Contains(draw, "row.id.toLowerCase().includes(q)") {
+		t.Fatal("the filter must match on the id that survived the index pairing")
+	}
+	// 行上写回的必须是全局下标 i,不是筛选后的位置。
+	if !strings.Contains(draw, `data-pv-drag="${i}"`) || !strings.Contains(draw, `data-i="${i}"`) {
+		t.Fatal("rows must carry the global index, not the filtered position")
 	}
 }
 
