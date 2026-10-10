@@ -1514,9 +1514,12 @@ async function showAliasSuggestions(){
     }
     // 渠道集合 = 别名表里已有的渠道 + 凭据里出现过的 provider。后者是为了让
     // "有上游模型但还没有渠道" 的 provider 也被报告出来，面板才好提示建渠道。
+    // ★ 归一化必须发生在 Array.from 之后：Set 没有 .map，写成
+    //   Array.from(new Set(...).map(...)) 会在点「补齐建议」时报
+    //   "(intermediate value).map is not a function"。
     const channelNames = Array.from(new Set(
       Object.keys(aliasDraft || {}).concat(credProviders || [])
-    ).map(s => String(s || "").trim().toLowerCase()).filter(Boolean));
+    )).map(s => String(s || "").trim().toLowerCase()).filter(Boolean);
     // 上游名单是这次判定的比较对象，实时收集，不读任何缓存快照。
     const upstream = await loadUpstreamModels(channelNames);
     const d = await call(API + "/alias-report", {
