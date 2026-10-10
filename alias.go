@@ -52,16 +52,6 @@ type missingAliasRow struct {
 	Alias    string `json:"alias"`
 	Reason   string `json:"reason"`
 	Channel  string `json:"channel"`
-	// AlreadyPrefixed marks a captured id that already starts with the provider
-	// prefix, which means the alias below would double it ("qoder-qoder-auto").
-	//
-	// Such an id is usually the result of an alias CPA already applied, so the row
-	// is normally one to leave alone — but not always: cline's upstream names are
-	// "cline-free/..." and "cline-pass/...", which start with "cline-" without
-	// having been aliased at all, and those do want the prefix. The two are
-	// indistinguishable from the name alone, so the row is still proposed and
-	// flagged instead of being dropped, leaving the decision to the operator.
-	AlreadyPrefixed bool `json:"already_prefixed,omitempty"`
 }
 
 // reasonMissing labels a row that would be added to oauth-model-alias. The
@@ -71,6 +61,9 @@ type missingAliasRow struct {
 const (
 	// reasonMissing marks a genuine gap: a bare id with no alias row.
 	reasonMissing = "missing alias"
+	// reasonAlreadyAliased marks a model the alias table already has a row for.
+	// It is decided from the table itself, never from the shape of the name.
+	reasonAlreadyAliased = "already aliased"
 	// reasonNoProvider marks an entry that neither owned_by nor the credential
 	// catalog can attribute to a provider.
 	reasonNoProvider = "no provider"
@@ -123,6 +116,21 @@ func buildAliasReport(port string, entries []catalogEntry, channels map[string]b
 // credential catalogs, so it passes the mapping through rather than the plugin
 // guessing a provider from the shape of a model name.
 func buildAliasReportWithProviders(port string, entries []catalogEntry, channels map[string]bool, modelProviders map[string][]string) aliasReport {
+	return buildAliasReportWithAliasTable(port, entries, channels, modelProviders, nil)
+}
+
+// buildAliasReportWithAliasTable is the full form: it also takes the current
+// oauth-model-alias table so a model that already has a row is not proposed
+// again.
+//
+// The table, not the shape of the name, is the authority. Deciding by prefix
+// cannot work: "qoder-auto" is the result of an alias CPA already applied,
+// while cline's "cline-free/..." is an upstream name that merely looks
+// prefixed, and no string test separates the two. The table simply lists which
+// (channel, name) rows exist.
+//
+// existing maps a channel to the model names it already covers.
+func buildAliasReportWithAliasTable(port string, entries []catalogEntry, channels map[string]bool, modelProviders map[string][]string, existing map[string]map[string]bool) aliasReport {
 	report := aliasReport{
 		Port:            port,
 		Captured:        len(entries),
@@ -204,6 +212,9 @@ func buildAliasReportWithProviders(port string, entries []catalogEntry, channels
 			continue
 		}
 		proposed := false
+		// recordedReason tracks whether a per-provider reason was already logged,
+		// so the no_channel fallback cannot double-count the same model.
+		recordedReason := false
 		for _, provider := range providers {
 			if !participates(provider) {
 				// openai and cline: no alias channel, and their names are intended.
@@ -213,6 +224,19 @@ func buildAliasReportWithProviders(port string, entries []catalogEntry, channels
 			if _, dup := seen[key]; dup {
 				continue
 			}
+			// A model that already has a row is not a gap. This is the one
+			// judgment that belongs to the plugin: it reads the table instead of
+			// guessing from the name, so it cannot mistake an upstream name that
+			// merely looks prefixed for an existing alias.
+			if existing[provider][id] {
+				// Covered by the table, so no row to propose. recordedReason keeps
+				// the no_channel fallback from adding a second, vaguer reason for
+				// the same model; Ignored is still incremented once by the block
+				// below, because this model produced no proposal.
+				skip(provider, id, reasonAlreadyAliased)
+				recordedReason = true
+				continue
+			}
 			seen[key] = struct{}{}
 			report.Missing = append(report.Missing, missingAliasRow{
 				Provider: provider,
@@ -220,10 +244,6 @@ func buildAliasReportWithProviders(port string, entries []catalogEntry, channels
 				Alias:    providerPrefix(provider) + id,
 				Reason:   reasonMissing,
 				Channel:  provider,
-				// Flagged, not filtered: the operator gets to see the row and
-				// decide, because a prefix on the id does not prove the id was
-				// already aliased (see the field's comment).
-				AlreadyPrefixed: strings.HasPrefix(id, providerPrefix(provider)),
 			})
 			proposed = true
 		}
@@ -231,7 +251,9 @@ func buildAliasReportWithProviders(port string, entries []catalogEntry, channels
 			// This model produced no row: count it once, and if no more specific
 			// reason was recorded above, note that its providers have no channel.
 			report.Ignored++
-			skip(strings.Join(providers, ","), id, reasonNoChannel)
+			if !recordedReason {
+				skip(strings.Join(providers, ","), id, reasonNoChannel)
+			}
 		}
 	}
 	sort.SliceStable(report.Missing, func(i, j int) bool {

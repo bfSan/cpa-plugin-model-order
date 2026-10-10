@@ -143,6 +143,12 @@ type aliasReportRequest struct {
 	// The plugin cannot read the credential catalogs itself -- the host exposes no
 	// RPC for them -- so the panel supplies the mapping.
 	ModelProviders map[string][]string `json:"model_providers"`
+	// ExistingAliases maps a channel to the model names it already has a row
+	// for, so a model with a row is not proposed again. The panel holds the table
+	// (it fetches it in order to write it), and the plugin cannot read it: the
+	// host exposes OAuthModelAlias only through StaticModelRequest, which a
+	// response interceptor never receives.
+	ExistingAliases map[string][]string `json:"existing_aliases"`
 }
 
 // handleAliasReport answers "which models are leaking under a bare name".
@@ -172,9 +178,24 @@ func handleAliasReport(body []byte) ([]byte, error) {
 			"reports": []aliasReport{},
 		}))
 	}
+	existing := make(map[string]map[string]bool, len(req.ExistingAliases))
+	for channel, names := range req.ExistingAliases {
+		channel = strings.ToLower(strings.TrimSpace(channel))
+		if channel == "" {
+			continue
+		}
+		set := make(map[string]bool, len(names))
+		for _, name := range names {
+			if trimmed := strings.TrimSpace(name); trimmed != "" {
+				set[trimmed] = true
+			}
+		}
+		existing[channel] = set
+	}
 	reports := make([]aliasReport, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		reports = append(reports, buildAliasReportWithProviders(snapshot.Port, snapshot.Entries, channels, req.ModelProviders))
+		reports = append(reports, buildAliasReportWithAliasTable(
+			snapshot.Port, snapshot.Entries, channels, req.ModelProviders, existing))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{"reports": reports}))
 }

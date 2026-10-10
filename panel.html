@@ -1069,7 +1069,10 @@ function aliasTotalRows(){
 }
 
 function renderAlias(){
-  $("aliasSuggest").innerHTML = "";
+  // 建议列表**不在这里清空**：它是扫描结果，不是编辑器的一部分。
+  // 此前 renderAlias 顺手清掉它，而点一条建议会走 aliasTouched → renderAlias，
+  // 于是每点一条整张列表就消失，想连续补几条就得反复重扫。
+  // 清空只发生在重新扫描时（scanAlias 开头）。
   const picker = $("aliasChannels");
   picker.innerHTML = "";
   const body = $("aliasRows");
@@ -1463,7 +1466,18 @@ async function showAliasSuggestions(){
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         channels: Object.keys(aliasDraft || {}),
-        model_providers: credCatalog || {}
+        model_providers: credCatalog || {},
+        // 把当前别名表一并送上，让后端据此判断"这个模型已经有别名的行"。
+        // 后端无法自己读这张表（宿主只通过 StaticModelRequest 暴露
+        // OAuthModelAlias，而响应拦截器收不到），所以由面板带上。
+        // 同时送 name 与 alias：一个模型若已有行，它在 listing 里可能以上游原名
+        // 出现（行还没生效），也可能以别名出现（CPA 已替换过），两者都算"已覆盖"。
+        existing_aliases: Object.fromEntries(
+          Object.entries(aliasDraft || {}).map(([ch, rows]) => [
+            ch,
+            [...new Set((rows || []).flatMap(r => [r.name, r.alias]).filter(Boolean))]
+          ])
+        )
       })
     });
     const list = $("aliasSuggest");
@@ -1493,10 +1507,6 @@ async function showAliasSuggestions(){
       const byReason = (report && report.skipped_by_reason) || {};
       const skipped = (report && report.skipped) || [];
       const mineSkipped = skipped.filter(s => !aliasChannel || s.provider === aliasChannel);
-      const prefixedCount = missing.filter(m => m.already_prefixed && (!aliasChannel || m.channel === aliasChannel)).length;
-      if (prefixedCount) {
-        say("另有 " + prefixedCount + " 条已列出，但原名自带 provider 前缀（可能已是别名，需你确认）。");
-      }
       const reasons = Object.keys(byReason);
       if (reasons.length) {
         say("本次捕获 " + (report.captured || 0) + " 个模型，其中 " + (report.ignored || 0) +
@@ -1530,18 +1540,6 @@ async function showAliasSuggestions(){
       btn.className = "mini";
       btn.textContent = known ? "已存在" : (taken ? "别名被占用" : "填入");
       btn.disabled = known || !!taken;
-      // 原名已带 provider 前缀的行：别名会叠加成 qoder-qoder-auto 这种形式。
-      // 这可能是 CPA 已经替换过的结果（无需动作），也可能是 cline 那种
-      // "上游原名恰好以 cline- 开头"（就该加）。插件不替操作者判断，只标出来。
-      if (m.already_prefixed) {
-        const note = document.createElement("span");
-        note.className = "muted";
-        note.style.fontSize = "12px";
-        note.textContent = "（原名已含 " + m.channel + "- 前缀，应用后为 " + m.alias + "）";
-        note.title = "这个名字以 " + m.channel + "- 开头。若它已是 CPA 替换后的别名，" +
-          "再加前缀会重复；若它是上游原名（如 cline 的 cline-free/...），则正是应有的别名。";
-        label.appendChild(note);
-      }
       if (taken) {
         li.title = "别名 " + m.alias + " 已指向上游名 " + taken.name + "；直接填入会产生重复别名。";
         const warn = document.createElement("span");
@@ -1555,7 +1553,12 @@ async function showAliasSuggestions(){
         aliasDraft[m.channel].push({ name: m.model, alias: m.alias });
         aliasChannel = m.channel;
         aliasTouched();
-        toast("ok", "已填入编辑区，记得点保存");
+        // 只移掉刚填入的这一行，其余建议原样留着，方便连续补多条。
+        // 整张列表由扫描重建，点击不触发重扫，所以不会把结果冲掉。
+        li.remove();
+        const left = list.querySelectorAll("li:not(.empty)").length;
+        toast("ok", left ? ("已填入编辑区，剩余 " + left + " 条推荐，记得点保存")
+                         : "已填入编辑区，推荐已全部处理，记得点保存");
       });
       li.append(label, spacer, btn);
       list.appendChild(li);
