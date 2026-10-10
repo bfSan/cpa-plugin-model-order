@@ -434,10 +434,22 @@ func mgmtJSONResponse(status int, payload any) pluginapi.ManagementResponse {
 	}
 }
 
+// mgmtHTMLResponse serves the panel with caching explicitly disabled.
+//
+// Without a Cache-Control header the browser heuristically caches the page, and
+// it does: after deploying a new build the panel kept showing the old UI on
+// refresh, which reads as "the deploy did not work" while the server was
+// already serving the new bytes. The page is local and re-read constantly while
+// editing, so it must always come from the plugin.
 func mgmtHTMLResponse(html string) pluginapi.ManagementResponse {
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
-		Body:       []byte(html),
+		Headers: http.Header{
+			"Content-Type":  []string{"text/html; charset=utf-8"},
+			"Cache-Control": []string{"no-store, no-cache, must-revalidate, max-age=0"},
+			"Pragma":        []string{"no-cache"},
+			"Expires":       []string{"0"},
+		},
+		Body: []byte(html),
 	}
 }
