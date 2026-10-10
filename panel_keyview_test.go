@@ -114,6 +114,72 @@ func TestPreviewKeepsDeniedModelsListedAndRestorable(t *testing.T) {
 	}
 }
 
+// 隐藏按钮曾在 ALL(不限制) 视角下整段消失,被操作者报告为「按钮丢失了」。它必须
+// 始终渲染:可隐藏时是「隐藏/恢复」,不可隐藏时是禁用态并把前提写进 title。
+// 顺手钉住 45% 常显:按钮若退回 hover-only,48 行的长列表里依然没人找得到。
+func TestPreviewHideButtonSurvivesEveryScope(t *testing.T) {
+	draw := panelSection(t, "function drawPreview()", "\nfunction setPreviewHidden(")
+	if !strings.Contains(draw, "const canHide = !!selectedScope;") {
+		t.Fatal("drawPreview must branch on the selected scope")
+	}
+	// 两个分支都必须在:有 Key 时给出可点的隐藏/恢复,没 Key 时给出禁用态。
+	if !strings.Contains(draw, "canHide") || !strings.Contains(draw, "disabled") {
+		t.Fatal("drawPreview must render the hide button in both scopes, disabled when unscoped")
+	}
+	html := renderPanel()
+	if !strings.Contains(html, "#preview li .flag{opacity:.45}") {
+		t.Fatal("preview action buttons must stay partially visible without hover")
+	}
+}
+
+// 预览过去只显示 owned_by,分组标签只在右侧「实际下发」出现,同一模型在两个窗口
+// 里读起来不是一回事。预览必须复用 firstRule,与右侧同款命中/未分组标签。
+// 但同时:纯字母序模式下规则不参与排序,那时挂分组标签等于编造一个不存在的分组。
+func TestPreviewShowsTheSameGroupChipAsTheModelsList(t *testing.T) {
+	draw := panelSection(t, "function drawPreview()", "\nfunction setPreviewHidden(")
+	if !strings.Contains(draw, "firstRule(id)") {
+		t.Fatal("drawPreview must reuse firstRule so both windows agree on the group")
+	}
+	if !strings.Contains(draw, `class="chip ${hit ? "hit" : "none"}"`) {
+		t.Fatal("drawPreview must render the same hit/none group chip as renderModels")
+	}
+	if !strings.Contains(draw, `state.strategy !== "name"`) {
+		t.Fatal("the group chip must be suppressed in the pure-alphabetical strategy")
+	}
+}
+
+// 排序规则只作用于预览。布局必须让这句话自己成立:规则与预览同列上下相邻,否则
+// 并排的「规则 | 实际下发」会被读成「规则作用于右边那个列表」。
+func TestOrderRulesSitInTheSameColumnAsThePreview(t *testing.T) {
+	html := renderPanel()
+	for _, want := range []string{
+		".card-rules{grid-column:1;grid-row:3}",
+		".card-preview{grid-column:1;grid-row:4}",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("panel layout is missing %q", want)
+		}
+	}
+	// 右侧那张只占第 2 列,不能横跨到规则的列上。
+	if !strings.Contains(html, ".card-models{grid-column:2;grid-row:3/span 2}") {
+		t.Fatal("the actual-models card must stay in column 2")
+	}
+	// 显式行号会让自动放置的元素(操作栏、跨列的别名卡)掉到所有卡片之后,
+	// 所以它们也必须显式定位。
+	for _, want := range []string{
+		".actions{grid-column:1/-1;grid-row:1}",
+		".card-full{grid-column:1/-1;grid-row:2}",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("explicit rows pushed %q out of place; it needs its own row", want)
+		}
+	}
+	// 单列时必须清掉全部显式定位,否则 span 会造出隐式第二列。
+	if !strings.Contains(html, ".actions,.card-full,.card-rules,.card-models,.card-preview{grid-column:1/-1;grid-row:auto}") {
+		t.Fatal("the single-column media query must reset every explicit grid placement")
+	}
+}
+
 // Hiding one model must write one exact id. A wildcard would take out a whole
 // family from a single click, which is the accident this editor should not enable.
 func TestHideWritesAnExactModelIdNotAWildcard(t *testing.T) {

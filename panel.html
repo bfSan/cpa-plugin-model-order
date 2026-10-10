@@ -58,8 +58,20 @@ header h1{font-size:16px;margin:0;font-weight:600}
 .actions{grid-column:1/-1;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 #btnSave{min-width:120px}
 .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;grid-column:1/-1}
-main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;padding:16px;max-width:1500px;margin:0 auto}
-@media (max-width:980px){main{grid-template-columns:minmax(0,1fr)}}
+main{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:14px;padding:16px;max-width:1500px;margin:0 auto}
+/* 排序规则与预览必须同列相邻：规则只影响下面的预览，不影响右侧的「实际下发」。
+   放在同一列、上下紧挨，因果关系才看得出来；早期左规则/右模型并排的布局会被读成
+   「规则作用于右边那个列表」。 */
+/* 四张卡片都写死了行号,自动放置的 .actions 会被挤到这些显式行之后(页面最底部)。
+   所以 .actions 也必须显式占第 1 行,卡片整体顺延一行。 */
+.actions{grid-column:1/-1;grid-row:1}
+.card-full{grid-column:1/-1;grid-row:2}
+.card-rules{grid-column:1;grid-row:3}
+.card-models{grid-column:2;grid-row:3/span 2}
+.card-preview{grid-column:1;grid-row:4}
+@media (max-width:980px){main{grid-template-columns:minmax(0,1fr)}
+  /* 单列时清掉全部显式定位,否则 grid-row:3/span 2 会造出隐式第二列,把版面撑歪。 */
+  .actions,.card-full,.card-rules,.card-models,.card-preview{grid-column:1/-1;grid-row:auto}}
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);
   overflow:hidden;display:flex;flex-direction:column;min-width:0}
 .card>h2{margin:0;padding:12px 14px;font-size:14px;font-weight:600;border-bottom:1px solid var(--border);
@@ -116,6 +128,11 @@ ul.models li.denied .flag{opacity:1}
 .chip.denied{color:var(--err);background:var(--err-soft);border-color:var(--err-border)}
 .flag{margin-left:auto;display:flex;gap:4px;opacity:0;transition:opacity .1s;flex:0 0 auto}
 ul.models li:hover .flag,li.pick .flag{opacity:1}
+/* 预览区的操作按钮不跟随 hover 隐藏:hover-only 的按钮在 48 行长列表里没人找得到
+   (实测被报告为「隐藏按钮丢失了」)。这里降到半透明常显,悬停再变实,兼顾可发现性与
+   不喧宾夺主。其余列表沿用 hover 显示的旧行为。 */
+#preview li .flag{opacity:.45}
+#preview li:hover .flag,#preview li.pick .flag{opacity:1}
 table.alias-table{width:100%;border-collapse:collapse;font-size:12px}
 table.alias-table th{text-align:left;font-weight:600;color:var(--mut);font-size:11px;
   padding:4px 8px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--card)}
@@ -206,7 +223,7 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
     <button id="btnGen">按预览生成精确规则</button>
     <button class="primary" id="btnSave">保存并生效</button>
   </div>
-  <section class="card" style="grid-column:1/-1">
+  <section class="card card-full">
     <h2>模型别名 <span class="hint">CPA 的 oauth-model-alias,只能精确匹配。这里可以任意增删改</span>
       <span class="spacer"></span><span class="chip" id="aliasCnt"></span></h2>
     <div class="bar">
@@ -238,7 +255,7 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
       <b>保存按渠道整体覆盖</b>,所以只会写「你打开后确实改过」的那些渠道,没碰的渠道一个字节都不动。
     </div>
   </section>
-  <section class="card">
+  <section class="card card-rules">
     <h2>排序规则 order <span class="hint">从上到下匹配,先命中先入组;留空即不分组,全部字母序</span></h2>
     <div class="bar">
       <input type="text" class="grow" id="newPattern" placeholder="模型 ID 或通配,如 gpt-* / *-auto / *kimi*">
@@ -246,9 +263,10 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
       <button class="mini" id="btnTop" title="添加到最前面">置顶</button>
     </div>
     <div class="body"><ol class="rules" id="rules"></ol></div>
-    <div class="note">每条规则各成一桶,桶内按模型 ID 字母序。未命中任何规则的模型排在最后,同样按字母序。</div>
+    <div class="note">每条规则各成一桶,桶内按模型 ID 字母序。未命中任何规则的模型排在最后,同样按字母序。
+      <b>这些规则排序的是下方「预览」</b>,不改变右侧「CPA 实际下发的模型」里的原始列表(那里只记录各端口真切收到的 ID,按 ID 排列)。</div>
   </section>
-  <section class="card">
+  <section class="card card-models">
     <h2>CPA 实际下发的模型 <span class="hint" id="capHint"></span></h2>
     <div class="bar">
       <select id="port"></select>
@@ -265,8 +283,8 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
     <div class="body"><ul class="models" id="models"></ul></div>
     <div class="note">这里列出的是各端口真实收到的 ID。Anthropic 端口是伪装名,想单独控制它就直接点右侧的“精确”,把伪装 ID 写成规则。</div>
   </section>
-  <section class="card" style="grid-column:1/-1">
-    <h2>预览 <span class="hint">用未保存的规则实时计算,排序与插件运行时同一套代码</span>
+  <section class="card card-preview">
+    <h2>预览 <span class="hint">排序结果只在这里体现:用未保存的规则实时计算,排序与插件运行时同一套代码</span>
       <span class="spacer"></span><span class="chip" id="pvPort"></span></h2>
     <div class="bar">
       <span class="hint">API Key</span>
@@ -275,7 +293,7 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
       <span class="chip" id="pvCount"></span>
     </div>
     <div class="bar">
-      <span class="hint">拖动手柄排序(或聚焦后按 ↑ / ↓);点“隐藏”把该模型从这个 Key 的列表移除,点“恢复”撤销。隐藏项保留在原位置灰显示,排序不受影响。</span>
+      <span class="hint">拖动手柄排序(或聚焦后按 ↑ / ↓);点“隐藏”把该模型从这个 Key 的列表移除,点“恢复”撤销。隐藏项保留在原位置灰显示,排序不受影响。<b>隐藏按 API Key 生效:先在上面选一个 Key 再点“隐藏”;ALL(不限制) 视角下按钮为禁用态。</b></span>
       <span class="spacer"></span>
       <button class="primary" id="btnSaveVisibility" disabled>保存可见性</button>
       <button id="btnRevertVisibility" disabled>放弃改动</button>
@@ -851,13 +869,23 @@ function drawPreview(){
     const e = byId[id] || {};
     const hidden = deniedNow.has(id);
     const cls = [i === previewSel ? "pick" : "", hidden ? "denied" : ""].filter(Boolean).join(" ");
+    // 隐藏按钮在 ALL 视角下也要在,但禁用并说明原因:它整段消失过一次,操作者
+    // 报告「按钮找不到了」。可见性本来就是按 Key 存的,这里用禁用态把前提讲清楚,
+    // 而不是让按钮凭空不见。
     const action = canHide
       ? `<button class="mini" data-pv-act="${hidden ? "restore" : "hide"}" data-pv-id="${esc(id)}">${hidden ? "恢复" : "隐藏"}</button>`
-      : "";
+      : `<button class="mini" disabled title="隐藏是按 API Key 生效的:先在上方选一个 Key 再操作">隐藏</button>`;
+    // 分组标签与右侧「实际下发」用同一套 firstRule,两个窗口对同一个模型给出
+    // 相同结论;否则预览里看不出这条模型归了哪组,得回头去右边的窗口找。
+    // 「纯字母序」模式下规则不参与排序,这时挂分组标签等于暗示一个不存在的分组,
+    // 所以只在分组模式显示。
+    const grouped = state.strategy !== "name";
+    const hit = grouped ? firstRule(id) : "";
     return `<li class="${cls}" data-i="${i}" data-id="${esc(id)}">
       <button type="button" class="drag-handle" data-pv-drag="${i}" aria-label="拖动第 ${i + 1} 项排序" title="拖动排序">⋮⋮</button>
       <span class="idx">${i + 1}</span><span class="name">${esc(id)}</span>
       ${e.owned_by ? `<span class="chip">${esc(e.owned_by)}</span>` : ""}
+      ${grouped ? `<span class="chip ${hit ? "hit" : "none"}">${hit ? esc(hit) : "未分组"}</span>` : ""}
       ${hidden ? `<span class="chip denied">已隐藏</span>` : ""}
       <span class="flag">${action}</span>
     </li>`;
@@ -866,7 +894,10 @@ function drawPreview(){
   if (chip) {
     chip.textContent = selectedScope
       ? `${previewIds.length} 个模型 · 该 Key 看不到 ${deniedNow.size} 个`
-      : `${previewIds.length} 个模型`;
+      : `${previewIds.length} 个模型 · 隐藏需先选一个 Key`;
+    chip.title = selectedScope
+      ? `当前按 ${selectedScope} 计算可见性`
+      : "ALL(不限制) 视角:这里只预览排序结果。隐藏是按 API Key 单独记录的,先选一个 Key 才能隐藏。";
   }
   updateVisibilityButtons();
 }
