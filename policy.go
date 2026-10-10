@@ -104,17 +104,6 @@ func filterPort(port string) bool {
 	return port == portOpenAI || port == portCodex
 }
 
-// looksLikeDirectPass reports whether a model id is an upstream pass-through name
-// in provider/model form, such as cline's "anthropic/claude-opus-5.5".
-//
-// Such a name is not a bare id that forgot its alias: the provider already names
-// it, and prefixing it would produce nonsense such as
-// "cline-anthropic/claude-opus-5.5". Alias reporting skips these for the same
-// reason, and the two rules deliberately share this one predicate.
-func looksLikeDirectPass(id string) bool {
-	return strings.Contains(id, "/")
-}
-
 // providerPrefix is the alias convention CPA deployments use: every alias for a
 // provider is its id with "<provider>-" in front. Detecting an already aliased id
 // is what keeps the report down to genuinely missing entries.

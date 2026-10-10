@@ -47,19 +47,24 @@ func TestAliasReportRouteServesTheOpenAIPort(t *testing.T) {
 	if report.Port != portOpenAI {
 		t.Errorf("port = %q, want %q", report.Port, portOpenAI)
 	}
-	if len(report.Missing) != 2 {
-		t.Fatalf("missing = %+v, want the two bare workbuddy names", report.Missing)
+	// 三个都列出：qoder-auto 已带前缀因此带标记，两个 workbuddy 裸名不带。
+	if len(report.Missing) != 3 {
+		t.Fatalf("missing = %+v, want all three attributable models", report.Missing)
 	}
 	for _, row := range report.Missing {
-		if row.Channel != "workbuddy" {
-			t.Errorf("channel = %q, want workbuddy", row.Channel)
+		if row.Channel != "workbuddy" && row.Channel != "qoder" {
+			t.Errorf("channel = %q, want workbuddy or qoder", row.Channel)
 		}
-		if !strings.HasPrefix(row.Alias, "workbuddy-") {
-			t.Errorf("alias %q is not provider prefixed", row.Alias)
+		// 别名一律是 <channel>-<原名>，即使原名已带前缀（那种情况由标记提示）。
+		if !strings.HasPrefix(row.Alias, row.Channel+"-") {
+			t.Errorf("alias %q is not prefixed with its channel %q", row.Alias, row.Channel)
 		}
 	}
-	if report.Ignored != 2 {
-		t.Errorf("ignored = %d, want 2 (one prefixed, one pass-through)", report.Ignored)
+	// 三个列出：两个 workbuddy 裸名 + 一个带前缀的 qoder 名。
+	// 夹具里那个 cline 模型被跳过（channels 只传了 qoder/workbuddy，
+	// 显式列表是权威，cline 没有别名通道可写）。
+	if report.Ignored != 1 {
+		t.Errorf("ignored = %d, want 1 (the cline model has no channel here)", report.Ignored)
 	}
 }
 

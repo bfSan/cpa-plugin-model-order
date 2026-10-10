@@ -1493,6 +1493,10 @@ async function showAliasSuggestions(){
       const byReason = (report && report.skipped_by_reason) || {};
       const skipped = (report && report.skipped) || [];
       const mineSkipped = skipped.filter(s => !aliasChannel || s.provider === aliasChannel);
+      const prefixedCount = missing.filter(m => m.already_prefixed && (!aliasChannel || m.channel === aliasChannel)).length;
+      if (prefixedCount) {
+        say("另有 " + prefixedCount + " 条已列出，但原名自带 provider 前缀（可能已是别名，需你确认）。");
+      }
       const reasons = Object.keys(byReason);
       if (reasons.length) {
         say("本次捕获 " + (report.captured || 0) + " 个模型，其中 " + (report.ignored || 0) +
@@ -1526,6 +1530,18 @@ async function showAliasSuggestions(){
       btn.className = "mini";
       btn.textContent = known ? "已存在" : (taken ? "别名被占用" : "填入");
       btn.disabled = known || !!taken;
+      // 原名已带 provider 前缀的行：别名会叠加成 qoder-qoder-auto 这种形式。
+      // 这可能是 CPA 已经替换过的结果（无需动作），也可能是 cline 那种
+      // "上游原名恰好以 cline- 开头"（就该加）。插件不替操作者判断，只标出来。
+      if (m.already_prefixed) {
+        const note = document.createElement("span");
+        note.className = "muted";
+        note.style.fontSize = "12px";
+        note.textContent = "（原名已含 " + m.channel + "- 前缀，应用后为 " + m.alias + "）";
+        note.title = "这个名字以 " + m.channel + "- 开头。若它已是 CPA 替换后的别名，" +
+          "再加前缀会重复；若它是上游原名（如 cline 的 cline-free/...），则正是应有的别名。";
+        label.appendChild(note);
+      }
       if (taken) {
         li.title = "别名 " + m.alias + " 已指向上游名 " + taken.name + "；直接填入会产生重复别名。";
         const warn = document.createElement("span");

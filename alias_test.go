@@ -10,7 +10,7 @@ import (
 // realChannels is the alias table as CPA actually holds it in this deployment:
 // qoder and workbuddy have channels, openai and cline do not.
 func realChannels() map[string]bool {
-	return map[string]bool{"qoder": true, "workbuddy": true}
+	return map[string]bool{"qoder": true, "workbuddy": true, "cline": true}
 }
 
 // aliasEntries mirrors the shape of the real captured listing. The fixture is the
@@ -30,11 +30,13 @@ func realCatalogEntries() []catalogEntry {
 		{ID: "space-bunny", OwnedBy: "workbuddy"},
 		{ID: "hy4-preview-dev", OwnedBy: "workbuddy"},
 		{ID: "hy4-preview-x", OwnedBy: "workbuddy"},
-		// cline pass-throughs: not missing aliases.
+		// cline: the upstream names themselves. "cline-free/..." starts with the
+		// cline prefix without having been aliased, so it still wants a row.
 		{ID: "anthropic/claude-opus-5.5", OwnedBy: "cline"},
 		{ID: "anthropic/claude-sonnet-5.5", OwnedBy: "cline"},
 		{ID: "openai/gpt-6.1-sol", OwnedBy: "cline"},
-		{ID: "spacexai/grok-4.7", OwnedBy: "cline"},
+		{ID: "x-ai/grok-4.7", OwnedBy: "cline"},
+		{ID: "cline-free/solar-mini4", OwnedBy: "cline"},
 		// Not attributable: owned_by is the only source of the owning provider.
 		{ID: "some-unowned-model", OwnedBy: ""},
 		// No identity at all: readCatalogEntries drops these, but the report must
@@ -43,60 +45,107 @@ func realCatalogEntries() []catalogEntry {
 	}
 }
 
-// The measured result: exactly three missing aliases. The cline provider/model
-// names are the trap. Counting them would report seven and propose aliases such
-// as "cline-anthropic/claude-opus-5.5", which is not a model any provider serves.
-func TestAliasReportFindsExactlyThreeBareNames(t *testing.T) {
+// 报告不再替操作者筛掉"看起来已经改好"的名字，而是全部列出并标记。
+// cline 的可见模型全是上游原名（cline-free/*、x-ai/grok-4.7），它们在旧规则下
+// 被整组跳过，报告里一条 cline 建议都没有 —— 但 cline-anthropic/claude-opus-5.5
+// 这类别名是合法的（cline 是本部署的 provider，斜杠后是 cline 下的来源）。
+//
+// 反过来 qoder-auto 这种确实是 CPA 别名替换后的结果，套前缀会变成
+// qoder-qoder-auto。两者从名字上分不出来，所以标记出来交给操作者判断。
+func TestAliasReportListsEverythingAndFlagsPrefixed(t *testing.T) {
 	report := buildAliasReport(portOpenAI, realCatalogEntries(), realChannels())
-	if len(report.Missing) != 3 {
-		t.Fatalf("missing = %d rows, want 3: %+v", len(report.Missing), report.Missing)
+	// 每一个能归属到 provider 的模型都应出现在清单里（qoder 2 + workbuddy 6 +
+	// cline 5），不再有"看起来改好了就跳过"的静默丢弃。
+	if len(report.Missing) != 13 {
+		t.Fatalf("missing = %d rows, want every attributable model: %+v", len(report.Missing), report.Missing)
 	}
+	// 本身已带 provider 前缀的，必须标出来。
+	flagged := map[string]bool{}
+	for _, row := range report.Missing {
+		flagged[row.Model] = row.AlreadyPrefixed
+	}
+	for _, model := range []string{"qoder-auto", "workbuddy-auto", "workbuddy-space-bunny"} {
+		if !flagged[model] {
+			t.Errorf("%s should be flagged as already prefixed", model)
+		}
+	}
+	for _, model := range []string{"space-bunny", "hy4-preview-dev", "x-ai/grok-4.7"} {
+		if flagged[model] {
+			t.Errorf("%s must not be flagged as already prefixed", model)
+		}
+	}
+	// cline-free/* 以 "cline-" 开头，所以会被标记 —— 这正是要摆给操作者看的信息：
+	// 名字带前缀不等于已经配过别名。cline 的上游原名就该套上 cline- 前缀。
+	if !flagged["cline-free/solar-mini4"] {
+		t.Error("cline-free/* starts with the cline prefix and must be flagged for review")
+	}
+	// cline 的上游原名确实会进来，且别名就是 cline- 加原名。
+	if row, ok := proposedFor(report, "x-ai/grok-4.7"); !ok || row.Alias != "cline-x-ai/grok-4.7" {
+		t.Errorf("cline upstream name should be proposed as cline-x-ai/grok-4.7, got %+v", row)
+	}
+	if row, ok := proposedFor(report, "cline-free/solar-mini4"); !ok || row.Alias != "cline-cline-free/solar-mini4" {
+		t.Errorf("cline-free/* should be proposed too, got %+v", row)
+	}
+
+	// 三条真正的裸名建议依然正确（按模型查找，行按 channel+model 排序）。
 	want := []struct{ model, alias string }{
 		{"hy4-preview-dev", "workbuddy-hy4-preview-dev"},
 		{"hy4-preview-x", "workbuddy-hy4-preview-x"},
 		{"space-bunny", "workbuddy-space-bunny"},
 	}
-	for i, expect := range want {
-		if report.Missing[i].Model != expect.model {
-			t.Errorf("row %d model = %q, want %q", i, report.Missing[i].Model, expect.model)
+	for _, expect := range want {
+		row, ok := proposedFor(report, expect.model)
+		if !ok {
+			t.Fatalf("%s missing from the report", expect.model)
 		}
-		if report.Missing[i].Alias != expect.alias {
-			t.Errorf("row %d alias = %q, want %q", i, report.Missing[i].Alias, expect.alias)
+		if row.Alias != expect.alias {
+			t.Errorf("%s alias = %q, want %q", expect.model, row.Alias, expect.alias)
 		}
-		if report.Missing[i].Channel != "workbuddy" {
-			t.Errorf("row %d channel = %q, want workbuddy", i, report.Missing[i].Channel)
+		if row.Channel != "workbuddy" {
+			t.Errorf("%s channel = %q, want workbuddy", expect.model, row.Channel)
+		}
+		if row.AlreadyPrefixed {
+			t.Errorf("%s is a bare name and must not be flagged as prefixed", expect.model)
 		}
 	}
-	// Nine skipped: four cline pass-throughs, six already aliased, one with no
-	// owned_by and one with no id.
-	if report.Ignored != 12 {
-		t.Errorf("ignored = %d, want 12", report.Ignored)
+	// 只有三条真的没有 channel 可写：没有 owned_by 的一条、空 id 的一条，
+	// 以及 codex 那条（codex 不在 channel 列表里，没有别名通道可写）。
+	if report.Ignored != 3 {
+		t.Errorf("ignored = %d, want 3", report.Ignored)
 	}
 }
 
-func TestAliasReportSkipsProviderModelNames(t *testing.T) {
+// cline 的 provider/model 形式原名照样进清单。cline 是本部署的 provider，
+// 斜杠后面是 cline 下的来源，所以 cline-anthropic/claude-opus-5.5 是合法别名。
+func TestAliasReportProposesProviderModelNames(t *testing.T) {
 	report := buildAliasReport(portOpenAI, []catalogEntry{
 		{ID: "anthropic/claude-opus-5.5", OwnedBy: "cline"},
 		{ID: "openai/gpt-6.1-sol", OwnedBy: "cline"},
 	}, realChannels())
-	if len(report.Missing) != 0 {
-		t.Errorf("pass-through names must not be proposed for aliasing: %+v", report.Missing)
+	if len(report.Missing) != 2 {
+		t.Fatalf("provider/model names should be proposed: %+v", report.Missing)
 	}
-	if report.Ignored != 2 {
-		t.Errorf("ignored = %d, want 2", report.Ignored)
+	row, ok := proposedFor(report, "anthropic/claude-opus-5.5")
+	if !ok || row.Alias != "cline-anthropic/claude-opus-5.5" {
+		t.Errorf("alias = %q, want cline-anthropic/claude-opus-5.5", row.Alias)
 	}
 }
 
-func TestAliasReportSkipsAlreadyAliased(t *testing.T) {
+// 一个已经带 provider 前缀的名字同样会被提议。插件不去判断"这个名字是不是
+// 已经改好了" —— 操作者能在列表上看到它、也知道自己做过什么，比插件猜更可靠。
+// 仍然提议的代价只是多一行可忽略的建议；漏报的代价是操作者以为没有缺口。
+func TestAliasReportProposesAlreadyPrefixedModels(t *testing.T) {
 	report := buildAliasReport(portOpenAI, []catalogEntry{
 		{ID: "workbuddy-space-bunny", OwnedBy: "workbuddy"},
 		{ID: "qoder-auto", OwnedBy: "qoder"},
 	}, realChannels())
-	if len(report.Missing) != 0 {
-		t.Errorf("already aliased models must not be proposed again: %+v", report.Missing)
+	if len(report.Missing) != 2 {
+		t.Fatalf("every captured model should be proposed, got %+v", report.Missing)
 	}
-	if report.Note == "" {
-		t.Error("an empty report should say so plainly rather than look like a failure")
+	for _, row := range report.Missing {
+		if row.Alias != row.Channel+"-"+row.Model {
+			t.Errorf("alias = %q, want %s-%s", row.Alias, row.Channel, row.Model)
+		}
 	}
 }
 
@@ -138,19 +187,6 @@ func TestAliasReportNormalisesProviderCase(t *testing.T) {
 	}
 }
 
-func TestLooksLikeDirectPass(t *testing.T) {
-	for _, id := range []string{"anthropic/claude-opus-5.5", "openai/gpt-6.1-sol", "a/b"} {
-		if !looksLikeDirectPass(id) {
-			t.Errorf("%q should read as a pass-through", id)
-		}
-	}
-	for _, id := range []string{"space-bunny", "workbuddy-space-bunny", "", "nope"} {
-		if looksLikeDirectPass(id) {
-			t.Errorf("%q should not read as a pass-through", id)
-		}
-	}
-}
-
 // The report reads the catalog the interceptor recorded, so it must survive a
 // listing that the plugin never touched: an unfiltered, already ordered body.
 func TestAliasReportOnUnchangedListingStillRecords(t *testing.T) {
@@ -168,8 +204,13 @@ func TestAliasReportOnUnchangedListingStillRecords(t *testing.T) {
 		t.Fatal("the catalog must record the listing even when nothing changed, or the alias report has nothing to read")
 	}
 	report := buildAliasReport(snapshot.Port, snapshot.Entries, realChannels())
-	if len(report.Missing) != 0 {
-		t.Errorf("both captured models are aliased here, got %+v", report.Missing)
+	// workbuddy-space-bunny 已带前缀，仍会列出并标记（codex 没有 channel，不列）。
+	if len(report.Missing) != 1 {
+		t.Fatalf("the workbuddy model should be listed: %+v", report.Missing)
+	}
+	if !report.Missing[0].AlreadyPrefixed {
+		t.Errorf("%s carries its provider prefix and must be flagged: %+v",
+			report.Missing[0].Model, report.Missing[0])
 	}
 }
 
@@ -203,7 +244,7 @@ func TestProviderPrefix(t *testing.T) {
 // this report proposed openai-gpt-6.1-sol for every one of them, which buried the
 // three real rows under fourteen rows of noise. A provider that carries no
 // <provider>- prefixed model at all is not participating in aliasing.
-func TestAliasReportSkipsProvidersNotUsingAliases(t *testing.T) {
+func TestAliasReportFlagsModelsAlreadyCarryingThePrefix(t *testing.T) {
 	entries := []catalogEntry{
 		{ID: "gpt-5.5", OwnedBy: "openai"},
 		{ID: "gpt-5.6-luna", OwnedBy: "openai"},
@@ -214,14 +255,20 @@ func TestAliasReportSkipsProvidersNotUsingAliases(t *testing.T) {
 		{ID: "space-bunny", OwnedBy: "workbuddy"},
 	}
 	report := buildAliasReport(portOpenAI, entries, nil)
-	if len(report.Missing) != 1 {
-		t.Fatalf("missing = %+v, want only the workbuddy bare name", report.Missing)
+	// openai 四个模型因为没有 channel 依旧不提议；workbuddy 的两个都会列出，
+	// 其中 workbuddy-auto 由标记说明"它已经带前缀了"。
+	if len(report.Missing) != 2 {
+		t.Fatalf("missing = %+v, want both workbuddy names", report.Missing)
 	}
-	if report.Missing[0].Model != "space-bunny" {
-		t.Errorf("model = %q, want space-bunny", report.Missing[0].Model)
+	if row, ok := proposedFor(report, "space-bunny"); !ok || row.AlreadyPrefixed {
+		t.Errorf("space-bunny is a bare name, want it proposed unflagged: %+v", row)
 	}
-	if report.Ignored != 5 {
-		t.Errorf("ignored = %d, want 5", report.Ignored)
+	if row, ok := proposedFor(report, "workbuddy-auto"); !ok || !row.AlreadyPrefixed {
+		t.Errorf("workbuddy-auto carries its prefix, want it proposed and flagged: %+v", row)
+	}
+	// openai 四个没有可写通道（无 channel 列表时它不参与），另加无 id 的一个。
+	if report.Ignored != 4 {
+		t.Errorf("ignored = %d, want 4", report.Ignored)
 	}
 }
 
@@ -238,14 +285,17 @@ func TestAliasReportSkipsProvidersWithoutAChannel(t *testing.T) {
 		{ID: "space-bunny", OwnedBy: "workbuddy"},
 	}
 	report := buildAliasReport(portOpenAI, entries, map[string]bool{"qoder": true, "workbuddy": true})
-	if len(report.Missing) != 1 {
-		t.Fatalf("missing = %+v, want only the workbuddy bare name", report.Missing)
+	// 显式 channel 列表是权威：openai 与 cline 不在其中就不提议。
+	// workbuddy 的两个都列出，其中一个带标记。
+	if len(report.Missing) != 2 {
+		t.Fatalf("missing = %+v, want both workbuddy names", report.Missing)
 	}
-	if report.Missing[0].Model != "space-bunny" {
-		t.Errorf("model = %q, want space-bunny", report.Missing[0].Model)
+	if row, ok := proposedFor(report, "space-bunny"); !ok || row.AlreadyPrefixed {
+		t.Errorf("space-bunny should be proposed unflagged: %+v", row)
 	}
-	if report.Ignored != 4 {
-		t.Errorf("ignored = %d, want 4", report.Ignored)
+	// openai 两条 + cline 一条 + 无 id 一条 = 4（workbuddy-auto 已改为列出）
+	if report.Ignored != 3 {
+		t.Errorf("ignored = %d, want 3", report.Ignored)
 	}
 	if got := report.Channels; len(got) != 2 || got[0] != "qoder" || got[1] != "workbuddy" {
 		t.Errorf("channels = %v, want [qoder workbuddy]", got)
@@ -267,8 +317,16 @@ func TestAliasReportFallsBackToTheListing(t *testing.T) {
 		{ID: "gpt-6-sol", OwnedBy: "openai"},
 	}
 	report := buildAliasReport(portOpenAI, entries, nil)
-	if len(report.Missing) != 1 || report.Missing[0].Model != "space-bunny" {
-		t.Errorf("missing = %+v, want only space-bunny", report.Missing)
+	// workbuddy 采用前缀约定因此参与，它的四个名字全部列出（三个带标记）；
+	// openai 无前缀不参与，其两条不提议。
+	if row, ok := proposedFor(report, "space-bunny"); !ok || row.AlreadyPrefixed {
+		t.Fatalf("space-bunny should be proposed unflagged: %+v", row)
+	}
+	if _, ok := proposedFor(report, "gpt-6.1-sol"); ok {
+		t.Errorf("openai does not participate here and must not be proposed: %+v", report.Missing)
+	}
+	if len(report.Missing) != 4 {
+		t.Errorf("missing = %+v, want the four workbuddy names", report.Missing)
 	}
 	if len(report.Channels) != 0 {
 		t.Errorf("channels = %v, want empty when no list was supplied", report.Channels)
