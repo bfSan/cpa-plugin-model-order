@@ -3,6 +3,7 @@ package main
 import (
 	"sort"
 	"strings"
+	"time"
 )
 
 // CPA's oauth-model-alias matches exactly and has no wildcard syntax, so a new
@@ -34,6 +35,16 @@ type aliasReport struct {
 	// SkippedByReason counts Skipped per reason, so the panel can summarise
 	// without walking the list.
 	SkippedByReason map[string]int `json:"skipped_by_reason,omitempty"`
+	// CapturedAt is when the listing this report judges was captured. The report
+	// reads the last listing a client actually pulled, never a live /v1/models
+	// call, so its contents can be older than the catalog CPA currently serves.
+	// Without this timestamp a stale report is indistinguishable from a fresh
+	// one — which is exactly how "the plugin says five models, the report lists
+	// four" happens: the report was reading the previous snapshot.
+	CapturedAt time.Time `json:"captured_at,omitempty"`
+	// ListingCount is the number of entries in that snapshot, so the panel can
+	// contrast it with what the catalog shows now.
+	ListingCount int `json:"listing_count,omitempty"`
 }
 
 // skippedAliasRow is one captured model that no alias row was proposed for.

@@ -194,8 +194,14 @@ func handleAliasReport(body []byte) ([]byte, error) {
 	}
 	reports := make([]aliasReport, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		reports = append(reports, buildAliasReportWithAliasTable(
-			snapshot.Port, snapshot.Entries, channels, req.ModelProviders, existing))
+		report := buildAliasReportWithAliasTable(
+			snapshot.Port, snapshot.Entries, channels, req.ModelProviders, existing)
+		// 报告读的是快照，不是实时的 /v1/models，所以必须让调用方看见它有多旧。
+		// 缺了这两个字段，"插件说 5 个模型、报告只列 4 个"就无从解释 —— 实际是
+		// 报告在读上一版快照（模型列表变了而没有人重新拉过一次）。
+		report.CapturedAt = snapshot.SeenAt
+		report.ListingCount = len(snapshot.Entries)
+		reports = append(reports, report)
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusOK, map[string]any{"reports": reports}))
 }
