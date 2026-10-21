@@ -285,10 +285,7 @@ table.alias-table tr.gone input[type=text]{text-decoration:line-through;color:va
       <span class="chip" id="pvCount"></span>
     </div>
     <div class="bar">
-      <span class="hint">拖动手柄排序(或聚焦后按 ↑ / ↓)。点“隐藏”把该模型从这个 Key 的列表移除,点“恢复”撤销。隐藏项保留在原位置灰显示,排序不受影响。<b>隐藏按 API Key 生效:先选一个 Key;ALL(不限制) 视角下按钮为禁用态。</b></span>
-      <span class="spacer"></span>
-      <button class="primary" id="btnSaveVisibility" disabled>保存可见性</button>
-      <button id="btnRevertVisibility" disabled>放弃改动</button>
+      <span class="hint">拖动手柄排序(或聚焦后按 ↑ / ↓)。点“隐藏”把该模型从这个 Key 的列表移除,<b>点一下即保存</b>;点“恢复”撤销,同样立即保存。隐藏项保留在原位置灰显示,排序不受影响。<b>隐藏按 API Key 生效:先选一个 Key;ALL(不限制) 视角下按钮为禁用态。</b></span>
     </div>
     <div class="body"><ul class="models" id="preview"></ul></div>
     <div class="note" id="pvNote">
@@ -412,8 +409,8 @@ let previewTimer = 0;
 let apiKeys = [];        // [{ key, scope, label }]
 let keyByScope = {};     // scope → apiKeys 条目
 let selectedScope = "";  // "" = 不限制(ALL 视角)
-let denyDrafts = {};     // scope → 已编辑未保存的 deny 列表
-let knownDeny = {};      // scope → 已保存的 deny 列表(用于脏检查与放弃改动)
+let denyDrafts = {};     // scope → 当前 deny 列表(点击即落盘,所以它很快就等于 knownDeny)
+let knownDeny = {};      // scope → 已确认落盘的 deny 列表(写失败时回滚到它)
 let deniedNow = new Set(); // 当前预览里被标灰的模型
 
 
@@ -584,55 +581,46 @@ $("keyPicker").addEventListener("click", ev => {
   const tab = ev.target.closest(".chan-tab");
   if (!tab) return;
   const scope = tab.dataset.scope || "";
-  if (scope && selectedScope !== scope && visibilityDirty(selectedScope)) {
-    if (!confirm("当前 Key 的可见性有未保存改动,切换会丢掉它们。继续?")) return;
-    denyDrafts[selectedScope] = (knownDeny[selectedScope] || []).slice();
-  }
   selectedScope = scope;
   previewSel = -1;
   renderKeyPicker();
-  updateVisibilityButtons();
   schedulePreview(0);
 });
 
-function visibilityDirty(scope){
-  if (!scope) return false;
-  const draft = denyDrafts[scope] || [];
-  const base = knownDeny[scope] || [];
-  if (draft.length !== base.length) return true;
-  const a = draft.slice().sort(), b = base.slice().sort();
-  return a.some((v, i) => v !== b[i]);
-}
-function anyVisibilityDirty(){
-  return Object.keys(denyDrafts).some(scope => visibilityDirty(scope));
-}
-function updateVisibilityButtons(){
-  const scoped = !!selectedScope;
-  const dirtyNow = scoped && visibilityDirty(selectedScope);
-  const save = $("btnSaveVisibility"), revert = $("btnRevertVisibility");
-  if (save) { save.disabled = !dirtyNow; save.title = scoped ? "" : "先选择一个 API Key"; }
-  if (revert) revert.disabled = !dirtyNow;
-}
+// 隐藏/恢复点一下就落盘，所以这里不再有"未保存的可见性"这种状态。
+//
+// 写入串行化：连点几下的隐藏会连发几个 PATCH，若不排队，先发的可能后到，
+// 落盘的就是中间态。排队后每次发送的都取发送那一刻的完整草稿，最终落盘的
+// 一定是最后一次点击之后的状态。
+let visWriteChain = Promise.resolve();
 
-async function saveVisibility(){
-  if (!selectedScope) return;
-  const btn = $("btnSaveVisibility");
-  btn.disabled = true;
-  try {
-    await call(PLUGIN_CONFIG_PATH, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ access: buildAccessTable() })
-    });
-    knownDeny[selectedScope] = (denyDrafts[selectedScope] || []).slice();
-    renderKeyPicker();
-    updateVisibilityButtons();
-    toast("ok", "可见性已写入 config.yaml 并热更新");
-  } catch (e) {
-    toast("err", "保存可见性失败: " + e.message);
-  } finally {
-    updateVisibilityButtons();
-  }
+function queueVisibilityWrite(scope){
+  const run = async () => {
+    // 这次真正发出去的内容。取发送那一刻的草稿，所以连点时最后一次写入
+    // 一定包含之前所有点击的结果。
+    const access = buildAccessTable();
+    const hit = access.find(a => a.caller_scope === scope);
+    const sent = ((hit && hit.deny_models) || []).slice();
+    try {
+      await call(PLUGIN_CONFIG_PATH, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access })
+      });
+      // 只有真落盘的那份才算基线。若这里读当前草稿，飞行中又点了别的，
+      // 就会把没保存的内容记成已保存，失败回滚时界面与配置对不上。
+      knownDeny[scope] = sent;
+    } catch (e) {
+      // 必须回滚界面：草稿已经改了、盘上没改，不回滚就是在骗人。
+      denyDrafts[scope] = (knownDeny[scope] || []).slice();
+      renderKeyPicker();
+      schedulePreview(0);
+      toast("err", "隐藏/恢复未保存: " + e.message);
+    }
+  };
+  // 前一个无论成败都接着跑，避免一次失败卡死后续写入。
+  visWriteChain = visWriteChain.then(run, run);
+  return visWriteChain;
 }
 
 // buildAccessTable 把草稿渲染成插件的 access 表。
@@ -846,14 +834,12 @@ function drawPreview(){
       : "先用任一客户端拉一次模型列表,插件会在此处记下 CPA 真实下发的 ID。"}</li>`;
     const emptyChip = $("pvCount");
     if (emptyChip) emptyChip.textContent = "";
-    updateVisibilityButtons();
     return;
   }
   if (!shown.length) {
     $("preview").innerHTML = `<li class="empty">没有匹配「${esc(q)}」的模型。</li>`;
     const noMatchChip = $("pvCount");
     if (noMatchChip) noMatchChip.textContent = `0 / ${previewIds.length} 个匹配`;
-    updateVisibilityButtons();
     return;
   }
   $("preview").innerHTML = shown.map(({id, i}) => {
@@ -894,22 +880,25 @@ function drawPreview(){
       ? `当前按 ${selectedScope} 计算可见性`
       : "ALL(不限制) 视角:这里只预览排序结果。隐藏是按 API Key 单独记录的,先选一个 Key 才能隐藏。";
   }
-  updateVisibilityButtons();
 }
 
-// setPreviewHidden 把一次隐藏/恢复写进草稿。它只改本地草稿,点「保存可见性」才落盘,
-// 这样误点可以放弃。
+// setPreviewHidden 改一次隐藏/恢复并立刻落盘。
+//
+// 先改草稿再重绘、最后发 PATCH：界面立即响应，不必等一次往返。误点不必点
+// "放弃"，再点一次对应行的"恢复"就回去了，那也会立即写盘。
 function setPreviewHidden(id, hide){
   if (!selectedScope) return;
-  const list = (denyDrafts[selectedScope] || []).slice();
+  const scope = selectedScope;
+  const list = (denyDrafts[scope] || []).slice();
   // 精确到模型 ID 的一条 deny。用精确 ID 而不是通配:隐藏一个模型却顺手遮掉一族,
   // 是这里最不该发生的意外。
   const at = list.indexOf(id);
   if (hide && at < 0) list.push(id);
   if (!hide && at >= 0) list.splice(at, 1);
-  denyDrafts[selectedScope] = list;
+  denyDrafts[scope] = list;
   renderKeyPicker();
   schedulePreview(0);
+  queueVisibilityWrite(scope);
 }
 
 /* ---- 模型别名：读 / 改 / 写 CPA 的 oauth-model-alias ---- */
@@ -1944,14 +1933,6 @@ $("preview").addEventListener("keydown", ev => {
   $("preview").querySelector(`[data-pv-drag="${to}"]`)?.focus();
 });
 
-$("btnSaveVisibility").addEventListener("click", saveVisibility);
-$("btnRevertVisibility").addEventListener("click", () => {
-  if (!selectedScope) return;
-  denyDrafts[selectedScope] = (knownDeny[selectedScope] || []).slice();
-  renderKeyPicker();
-  schedulePreview(0);
-  toast("ok", "已放弃该 Key 的可见性改动");
-});
 
 $("btnAliasLoad").addEventListener("click", loadAliases);
 $("btnAliasSave").addEventListener("click", saveAliases);

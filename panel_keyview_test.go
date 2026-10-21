@@ -28,17 +28,18 @@ func panelSection(t *testing.T, startMarker, endMarker string) string {
 
 // The preview must offer a key selector and a way to save visibility, and it must
 // expose the two hooks the editor hangs off.
+//
+// Visibility is committed by clicking hide/restore rather than by a separate save
+// button, so the hooks that must exist are the writer and the handler reaching it.
 func TestPanelExposesPerKeyVisibilityControls(t *testing.T) {
 	html := renderPanel()
 	for _, want := range []string{
 		`id="keyPicker"`,
-		`id="btnSaveVisibility"`,
-		`id="btnRevertVisibility"`,
 		`id="pvCount"`,
 		`id="pvNote"`,
 		`async function loadAPIKeys()`,
 		`function buildAccessTable()`,
-		`async function saveVisibility()`,
+		`function queueVisibilityWrite(`,
 		`function setPreviewHidden(`,
 	} {
 		if !strings.Contains(html, want) {
@@ -49,6 +50,14 @@ func TestPanelExposesPerKeyVisibilityControls(t *testing.T) {
 	for _, unwanted := range []string{`id="pvUp"`, `id="pvDown"`, `id="pvHome"`} {
 		if strings.Contains(html, unwanted) {
 			t.Fatalf("panel still ships the removed %q control", unwanted)
+		}
+	}
+	// Click-to-save replaced the commit-button model. Leaving either control
+	// behind would restore a manual step that no longer matches the writer, so
+	// their absence is part of the contract rather than incidental cleanup.
+	for _, unwanted := range []string{`id="btnSaveVisibility"`, `id="btnRevertVisibility"`} {
+		if strings.Contains(html, unwanted) {
+			t.Fatalf("panel still ships the superseded %q control", unwanted)
 		}
 	}
 }
@@ -74,9 +83,13 @@ func TestPanelDerivesTheSameCallerScopeAsThePlugin(t *testing.T) {
 // Saving visibility must patch only the access key. A PATCH replaces the value it
 // carries wholesale, so sending order here would clobber unsaved rule edits, and
 // dropping label/allow_models from a stored policy would silently disarm it.
+//
+// This still holds under click-to-save: the writer now fires per click instead of
+// from a commit button, which makes the blast radius of a stray key larger rather
+// than smaller, because the operator no longer reviews a diff before it lands.
 func TestVisibilitySavePatchesOnlyAccessAndPreservesOtherFields(t *testing.T) {
-	save := panelSection(t, "async function saveVisibility()", "\nfunction buildAccessTable()")
-	if !strings.Contains(save, "JSON.stringify({ access: buildAccessTable() })") {
+	save := panelSection(t, "function queueVisibilityWrite(scope)", "\n// buildAccessTable")
+	if !strings.Contains(save, "JSON.stringify({ access })") {
 		t.Fatal("saving visibility must patch exactly the access key")
 	}
 	for _, unwanted := range []string{"order:", "strategy:", "case_sensitive:"} {
@@ -298,17 +311,32 @@ func TestPreviewSupportsDragOrdering(t *testing.T) {
 	}
 }
 
-// Switching keys with unsaved visibility edits must warn before discarding them.
-func TestSwitchingKeysGuardsUnsavedVisibility(t *testing.T) {
-	handler := panelSection(t, `$("keyPicker").addEventListener("click"`, "function visibilityDirty(")
-	if !strings.Contains(handler, "visibilityDirty(selectedScope)") {
-		t.Fatal("switching keys must check for unsaved visibility edits")
+// Switching keys no longer needs a discard prompt, because a hide is written the
+// moment it is clicked: there is no unsaved edit left to lose. What replaces that
+// guard is the ordering guarantee the writer has to keep.
+//
+// Rapid clicks fire one PATCH each. Unqueued, a later click could land first and
+// leave an intermediate state on disk, and a failed write has to roll the panel
+// back rather than show a hide that was never persisted.
+func TestVisibilityWritesAreSerializedAndRollBack(t *testing.T) {
+	writer := panelSection(t, "function queueVisibilityWrite(scope)", "\n// buildAccessTable")
+
+	// A single chain every write appends to, so writes cannot overtake each other.
+	if !strings.Contains(writer, "visWriteChain = visWriteChain.then(run, run)") {
+		t.Fatal("visibility writes must be chained so a later click cannot land before an earlier one")
 	}
-	if !strings.Contains(handler, "confirm(") {
-		t.Fatal("switching keys must ask before dropping unsaved visibility edits")
+	// The rejection handler keeps the chain alive: without the second argument one
+	// failed write would strand every write queued behind it.
+	if strings.Contains(writer, "visWriteChain.then(run)") {
+		t.Fatal("a failed write must not strand the writes queued behind it")
 	}
-	if !strings.Contains(handler, "denyDrafts[selectedScope] = (knownDeny[selectedScope] || []).slice()") {
-		t.Fatal("declining the switch must restore the draft from the saved baseline")
+	// Only what actually reached disk becomes the baseline.
+	if !strings.Contains(writer, "knownDeny[scope] = sent") {
+		t.Fatal("the baseline must be the payload that was sent, not the live draft")
+	}
+	// A failed write must restore the UI from the saved baseline.
+	if !strings.Contains(writer, "denyDrafts[scope] = (knownDeny[scope] || []).slice()") {
+		t.Fatal("a failed write must roll the panel back to the saved baseline")
 	}
 }
 
