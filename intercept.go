@@ -66,6 +66,25 @@ func governBody(sourceFormat string, headers http.Header, body []byte) ([]byte, 
 		list.elements = kept
 	}
 
+	// Capability backfill runs before the sort so the recorded catalog holds the
+	// entries that will actually be served, and so a reordering decision never
+	// has to reason about two shapes of the same entry.
+	//
+	// Learning happens here rather than in a dedicated call because the Codex
+	// catalog reaches this plugin as ordinary listing traffic: the host exposes no
+	// RPC that returns model capabilities, and asking for them out of band would
+	// mean this plugin fetching a listing it is supposed to be curating.
+	if port == portCodex {
+		capabilities.recordCodexCatalog(list.elements)
+	} else if port == portOpenAI {
+		// Only the plain OpenAI listing is backfilled. The Claude and Gemini ports
+		// already answer with their own capacity fields, and adding OpenAI-shaped
+		// keys to a response those clients parse natively would be noise at best.
+		if capabilities.backfill(list.elements) {
+			changed = true
+		}
+	}
+
 	_, reordered := reorder(list)
 	changed = changed || reordered
 	entries := readCatalogEntries(list.elements)

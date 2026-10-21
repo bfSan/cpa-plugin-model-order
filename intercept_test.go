@@ -138,6 +138,11 @@ func TestOrderBodyIsIdempotent(t *testing.T) {
 }
 
 func TestOrderBodyCapturesZeroAndOneModelListings(t *testing.T) {
+	// This case asserts that neither of these listings needs rewriting, which only
+	// holds on a listing the plugin has nothing learned about: a model whose
+	// capabilities were recorded elsewhere is legitimately rewritten when the
+	// backfill fills its fields in. State the premise instead of inheriting it.
+	beginIsolatedTest(t)
 	for _, ids := range [][]string{{}, {"workbuddy-hy3"}} {
 		body := listingBody(ids)
 		if _, changed := governBody(portOpenAI, nil, body); changed {
