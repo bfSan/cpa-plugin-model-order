@@ -255,6 +255,10 @@ func statusPayload() map[string]any {
 		// the listing, and the difference decides whether to fix config or wait.
 		"capability_refresh": catalogFetch.fetchState(),
 		"capability_count":   capabilities.count(),
+		// channel_capabilities shows every provider's own numbers for models served
+		// by more than one channel, so an aggregated context value can be traced
+		// back to the channel that constrained it.
+		"channel_capabilities": capabilities.channelReport(),
 	}
 }
 

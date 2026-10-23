@@ -55,6 +55,10 @@ func (c capability) empty() bool {
 type capabilityStore struct {
 	mu   sync.RWMutex
 	byID map[string]capability
+	// channels holds every provider's opinion about a model, so the listing can
+	// apply the intersection/union rules instead of showing whichever channel CPA
+	// happened to register last.
+	channels map[string][]providerFacts
 	// lower indexes the same records under a case-folded key so a lookup that
 	// misses exactly can still find a model whose casing differs between the two
 	// listings. CPA resolves model availability with strings.EqualFold, so a
@@ -185,6 +189,87 @@ func (s *capabilityStore) reset() {
 	defer s.mu.Unlock()
 	s.byID = nil
 	s.lower = nil
+	s.channels = nil
+}
+
+// applyChannelFacts replaces the per-channel table and, for every model that
+// more than one channel serves, overrides the catalog-derived facts with the
+// aggregated result.
+//
+// The override is keyed by public model ID. Upstream names never appear here: a
+// channel's internal name for a model is only meaningful inside that channel.
+func (s *capabilityStore) applyChannelFacts(byModel map[string][]providerFacts) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.channels = byModel
+
+	applied := 0
+	for id, channels := range byModel {
+		if len(channels) < 2 {
+			// A single channel already describes the model accurately; the catalog
+			// entry is as good as this and may carry fields the store does not.
+			continue
+		}
+		contextLength, levels := aggregateChannels(channels)
+		key := s.resolveKey(id)
+		if key == "" {
+			continue
+		}
+		current := s.byID[key]
+		if contextLength > 0 {
+			current.ContextLength = contextLength
+			current.MaxContextLength = contextLength
+		}
+		if len(levels) > 0 {
+			current.ReasoningLevels = levels
+			// The default a single channel reports is not a safe default across
+			// channels: qoder defaults dfmodel to 200K while workbuddy defaults the
+			// same model to a different tier. Drop it rather than mislead.
+			current.DefaultReasoningLevel = ""
+		}
+		if current.empty() {
+			continue
+		}
+		s.byID[key] = current
+		applied++
+	}
+	return applied
+}
+
+// resolveKey returns the stored key matching id exactly or case-insensitively.
+// Callers hold the lock.
+func (s *capabilityStore) resolveKey(id string) string {
+	if _, ok := s.byID[id]; ok {
+		return id
+	}
+	if original, ok := s.lower[strings.ToLower(id)]; ok {
+		return original
+	}
+	return ""
+}
+
+// channelReport returns the per-channel facts for the status route, so an
+// operator can see why a model's advertised context is what it is.
+func (s *capabilityStore) channelReport() map[string][]map[string]any {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string][]map[string]any, len(s.channels))
+	for id, channels := range s.channels {
+		if len(channels) < 2 {
+			continue
+		}
+		entries := make([]map[string]any, 0, len(channels))
+		for _, channel := range channels {
+			entries = append(entries, map[string]any{
+				"provider":        channel.Provider,
+				"context_default": channel.ContextDefault,
+				"context_max":     channel.ContextMax,
+				"levels":          channel.Levels,
+			})
+		}
+		out[id] = entries
+	}
+	return out
 }
 
 // capabilityField is one value to append to a listing entry.

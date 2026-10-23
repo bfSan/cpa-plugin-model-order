@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -255,6 +256,14 @@ func refreshCatalogOnce(ctx context.Context) bool {
 		logCatalogf("refresh failed body=%dB: %v", len(body), errLearn)
 		catalogFetch.setError(errLearn.Error())
 		return false
+	}
+	// Provider catalogs are read on the same schedule: they are the only source of
+	// per-channel facts, and a listing that reflects one channel is the bug this
+	// aggregation exists to fix.
+	cfg = currentConfig()
+	if configDir, errDir := os.UserConfigDir(); errDir == nil {
+		applied := capabilities.applyChannelFacts(gatherProviderFacts(configDir))
+		logCatalogf("refresh ok body=%dB learned=%d aggregated=%d", len(body), learned, applied)
 	}
 	logCatalogf("refresh ok body=%dB learned=%d total=%d", len(body), learned, capabilities.count())
 	catalogFetch.setSuccess(learned)
