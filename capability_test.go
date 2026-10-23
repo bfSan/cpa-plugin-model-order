@@ -215,12 +215,18 @@ func TestCapabilityBackfillWithOnlyContext(t *testing.T) {
 // beginIsolatedTest gives a test the state it needs without borrowing it from
 // whichever case happened to run first.
 //
-// Three package level stores outlive a single test: the active config, the two
-// catalog snapshots, and the capability records. Resetting them on entry rather
-// than deferring a reset keeps every case independent in both directions: a test
-// neither inherits a neighbour's leftovers nor leaves any for the next one.
+// Four package level stores outlive a single test: the active config, the two
+// catalog snapshots, the capability records, and the refresh loop's last-outcome
+// record. Resetting them on entry rather than deferring a reset keeps every case
+// independent in both directions: a test neither inherits a neighbour's leftovers
+// nor leaves any for the next one.
 func beginIsolatedTest(t *testing.T) {
 	t.Helper()
+	// Stop any refresh loop a previous case started before clearing the state it
+	// writes, or that goroutine races this test's assertions.
+	stopCatalogRefresh()
+
+	catalogFetch.reset()
 	capabilities.reset()
 	catalog.reset()
 	fullCatalog.reset()

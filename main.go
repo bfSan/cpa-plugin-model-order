@@ -158,6 +158,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		if err := configureFromRequest(request); err != nil {
 			return nil, err
 		}
+		// Start (or restart) the capability refresh here rather than in loadConfig,
+		// so the loop only runs in a real host and not in every unit test that
+		// installs a config.
+		startCatalogRefresh(currentConfig(), defaultStartupFetchDelay, emptyCatalogRetry)
 		return okEnvelope(modelOrderRegistration())
 
 	case pluginabi.MethodResponseInterceptAfter:
@@ -238,6 +242,26 @@ func modelOrderRegistration() registration {
 					Name:        "case_sensitive",
 					Type:        pluginapi.ConfigFieldTypeBoolean,
 					Description: "Match and compare model IDs case sensitively. Defaults to false.",
+				},
+				{
+					Name:        "catalog_base",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "Base URL of the CPA listener used for the capability catalog refresh. Defaults to http://127.0.0.1:8317.",
+				},
+				{
+					Name:        "catalog_path",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "Listing path fetched for capability facts. Defaults to /v1/models?client_version=cpa, the only shape that carries them.",
+				},
+				{
+					Name:        "catalog_api_key",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "API key used for the catalog refresh. Required: CPA rejects an unauthenticated listing request with 401.",
+				},
+				{
+					Name:        "catalog_refresh",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "How often to re-read the capability catalog, as a Go duration. Defaults to 1h.",
 				},
 			},
 		},

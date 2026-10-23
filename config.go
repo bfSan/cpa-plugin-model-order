@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,6 +16,14 @@ type rawConfig struct {
 	CaseSensitive bool           `yaml:"case_sensitive"`
 	Order         []string       `yaml:"order"`
 	Access        []accessPolicy `yaml:"access"`
+	// Catalog settings drive the background capability refresh. They are separate
+	// from the listing behaviour because the fetch is an internal detail: an
+	// operator who never configures them still gets ordering and visibility, just
+	// without backfilled capability fields.
+	CatalogBase    string `yaml:"catalog_base"`
+	CatalogPath    string `yaml:"catalog_path"`
+	CatalogAPIKey  string `yaml:"catalog_api_key"`
+	CatalogRefresh string `yaml:"catalog_refresh"`
 }
 
 // activeConfig is the compiled, immutable snapshot used by the interceptor.
@@ -33,6 +42,11 @@ type activeConfig struct {
 	// every caller is served the untouched listing, which is the state an
 	// unrestricted key depends on.
 	access *accessPolicyTable
+	// Catalog refresh settings, resolved from rawConfig.
+	catalogBase    string
+	catalogPath    string
+	catalogAPIKey  string
+	catalogRefresh time.Duration
 }
 
 var configStore atomic.Pointer[activeConfig]
@@ -65,9 +79,26 @@ func loadConfig(yamlBytes []byte) error {
 			next.fromConfig = true
 		}
 		next.access = compileAccessPolicies(parsed.Access)
+		next.catalogBase = strings.TrimSpace(parsed.CatalogBase)
+		next.catalogPath = strings.TrimSpace(parsed.CatalogPath)
+		next.catalogAPIKey = strings.TrimSpace(parsed.CatalogAPIKey)
+		if raw := strings.TrimSpace(parsed.CatalogRefresh); raw != "" {
+			interval, errInterval := time.ParseDuration(raw)
+			if errInterval != nil {
+				return fmt.Errorf("model-registry: invalid catalog_refresh %q: %w", raw, errInterval)
+			}
+			if interval <= 0 {
+				return fmt.Errorf("model-registry: catalog_refresh must be positive, got %q", raw)
+			}
+			next.catalogRefresh = interval
+		}
 	}
+
 	next.matchers = compileMatchers(next.order, next.caseSensitive)
 	configStore.Store(next)
+	// The refresh loop is started by main's register/reconfigure handler, not here:
+	// loadConfig also runs in unit tests, and starting a background fetcher from it
+	// would make every test spawn one.
 	return nil
 }
 

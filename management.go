@@ -249,6 +249,12 @@ func statusPayload() map[string]any {
 		// offer a model the operator already denied, or the deny could never be
 		// undone; catalogs above no longer contains those rows.
 		"full_catalogs": fullCatalog.list(),
+		// capability_refresh reports the background catalog fetch: when it last
+		// succeeded, how many models it learned, and why it is failing if it is.
+		// Without this, an empty backfill and a broken fetch look identical from
+		// the listing, and the difference decides whether to fix config or wait.
+		"capability_refresh": catalogFetch.fetchState(),
+		"capability_count":   capabilities.count(),
 	}
 }
 
