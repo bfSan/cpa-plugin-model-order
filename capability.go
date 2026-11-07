@@ -135,18 +135,50 @@ func (s *capabilityStore) lookup(id string) (capability, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if facts, ok := s.byID[id]; ok {
-		return facts, true
-	}
-	// Fall back to the folded index unconditionally: the caller's casing may match
-	// the folded form while the recorded ID is mixed case, which is the mirror of
-	// the case the exact lookup above handles.
-	if original, ok := s.lower[strings.ToLower(id)]; ok {
-		if facts, okFacts := s.byID[original]; okFacts {
-			return facts, true
+	key := id
+	if _, ok := s.byID[key]; !ok {
+		// Fall back to the folded index: the caller's casing may match the folded
+		// form while the recorded ID is mixed case, which is the mirror of the case
+		// the exact lookup above handles.
+		if original, okLower := s.lower[strings.ToLower(id)]; okLower {
+			key = original
+		} else {
+			return capability{}, false
 		}
 	}
-	return capability{}, false
+	facts, ok := s.byID[key]
+	if !ok {
+		return capability{}, false
+	}
+	return s.overrideWithChannels(key, facts), true
+}
+
+// overrideWithChannels applies the channel aggregation on read.
+//
+// Aggregating on write looked simpler but was wrong: the catalog refresh rewrites
+// every record from the listing, so the next refresh silently replaced the
+// aggregated numbers with whichever channel CPA happened to serve. Doing it here
+// makes the listing a function of the current channel table, so no refresh order
+// can undo it. Callers hold the read lock.
+func (s *capabilityStore) overrideWithChannels(key string, facts capability) capability {
+	channels := s.channels[key]
+	if len(channels) < 2 {
+		// A single channel already describes the model accurately.
+		return facts
+	}
+	contextLength, levels := aggregateChannels(channels)
+	if contextLength > 0 {
+		facts.ContextLength = contextLength
+		facts.MaxContextLength = contextLength
+	}
+	if len(levels) > 0 {
+		facts.ReasoningLevels = levels
+		// One channel's default is not a safe default across channels: qoder
+		// defaults dfmodel to 200K while workbuddy defaults the same model to a
+		// different tier, so the merged record carries no default at all.
+		facts.DefaultReasoningLevel = ""
+	}
+	return facts
 }
 
 // backfill injects learned capability facts into every entry of a plain listing
@@ -192,46 +224,20 @@ func (s *capabilityStore) reset() {
 	s.channels = nil
 }
 
-// applyChannelFacts replaces the per-channel table and, for every model that
-// more than one channel serves, overrides the catalog-derived facts with the
-// aggregated result.
+// applyChannelFacts replaces the per-channel table used by lookup.
 //
-// The override is keyed by public model ID. Upstream names never appear here: a
-// channel's internal name for a model is only meaningful inside that channel.
+// It deliberately does not rewrite the stored records: those are rebuilt from the
+// catalog on every refresh, so anything written here would be undone by the next
+// one. Storing the table and applying it on read keeps the two independent.
 func (s *capabilityStore) applyChannelFacts(byModel map[string][]providerFacts) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.channels = byModel
-
 	applied := 0
-	for id, channels := range byModel {
-		if len(channels) < 2 {
-			// A single channel already describes the model accurately; the catalog
-			// entry is as good as this and may carry fields the store does not.
-			continue
+	for _, channels := range byModel {
+		if len(channels) >= 2 {
+			applied++
 		}
-		contextLength, levels := aggregateChannels(channels)
-		key := s.resolveKey(id)
-		if key == "" {
-			continue
-		}
-		current := s.byID[key]
-		if contextLength > 0 {
-			current.ContextLength = contextLength
-			current.MaxContextLength = contextLength
-		}
-		if len(levels) > 0 {
-			current.ReasoningLevels = levels
-			// The default a single channel reports is not a safe default across
-			// channels: qoder defaults dfmodel to 200K while workbuddy defaults the
-			// same model to a different tier. Drop it rather than mislead.
-			current.DefaultReasoningLevel = ""
-		}
-		if current.empty() {
-			continue
-		}
-		s.byID[key] = current
-		applied++
 	}
 	return applied
 }

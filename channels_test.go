@@ -274,3 +274,50 @@ func TestAggregateCombinesBothRules(t *testing.T) {
 		t.Fatalf("levels = %v, want the union [medium]", levels)
 	}
 }
+
+// A refresh rewrites every record from the catalog. Aggregating on write meant
+// the next refresh replaced the merged levels with whichever single channel CPA
+// served, which is exactly how deepseek-v4.1-flash lost its "max" level while
+// trae happened to be the last registrant. Applying the table on read makes the
+// result independent of refresh order.
+func TestAggregationSurvivesCatalogRefresh(t *testing.T) {
+	capabilities.reset()
+	defer capabilities.reset()
+
+	// First the catalog populates the store, as learnCatalogBody does.
+	capabilities.recordCodexCatalog([][]byte{
+		[]byte(`{"slug":"deepseek-v4.1-flash","context_window":1000000,` +
+			`"supported_reasoning_levels":[{"effort":"high"},{"effort":"low"},{"effort":"xhigh"}]}`),
+	})
+	if got, _ := capabilities.lookup("deepseek-v4.1-flash"); len(got.ReasoningLevels) != 3 {
+		t.Fatalf("precondition: want the 3 catalog levels, got %v", got.ReasoningLevels)
+	}
+
+	capabilities.applyChannelFacts(map[string][]providerFacts{
+		"deepseek-v4.1-flash": {
+			facts("trae-cn", 1000000, 1000000, "high", "low", "xhigh"),
+			facts("workbuddy-cn", 1000000, 1000000, "low", "high", "max"),
+		},
+	})
+	got, _ := capabilities.lookup("deepseek-v4.1-flash")
+	want := []string{"low", "high", "xhigh", "max"}
+	if len(got.ReasoningLevels) != len(want) {
+		t.Fatalf("after aggregation levels = %v, want %v", got.ReasoningLevels, want)
+	}
+
+	// Now the next refresh writes the single-channel record again. The merged
+	// result must still be what callers see.
+	capabilities.recordCodexCatalog([][]byte{
+		[]byte(`{"slug":"deepseek-v4.1-flash","context_window":1000000,` +
+			`"supported_reasoning_levels":[{"effort":"high"},{"effort":"low"},{"effort":"xhigh"}]}`),
+	})
+	got, _ = capabilities.lookup("deepseek-v4.1-flash")
+	if len(got.ReasoningLevels) != len(want) {
+		t.Fatalf("a refresh must not undo aggregation: levels = %v, want %v", got.ReasoningLevels, want)
+	}
+	for i := range want {
+		if got.ReasoningLevels[i] != want[i] {
+			t.Fatalf("levels = %v, want %v", got.ReasoningLevels, want)
+		}
+	}
+}
