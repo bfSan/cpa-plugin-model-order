@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Provider channel aggregation.
@@ -80,6 +82,12 @@ var defaultProviderSources = []providerCatalogSource{
 // directory in addition to the config directory.
 var authDir = "/opt/cpa/auths"
 
+// cpaConfigPath carries oauth.model-alias, which translates provider-internal
+// IDs such as qmodel_38max into the public IDs the capability store serves.
+// This deployment already reads provider catalogs from /opt/cpa, so reading the
+// adjacent config keeps the aggregation on the same runtime source of truth.
+var cpaConfigPath = "/opt/cpa/config.yaml"
+
 // providerFacts is one channel's opinion about one model.
 type providerFacts struct {
 	Provider string
@@ -135,6 +143,8 @@ func gatherProviderFacts(configDir string) map[string][]providerFacts {
 			}
 		}
 	}
+	out = applyPublicAliases(out, readPublicAliases(cpaConfigPath))
+
 	// One provider writes several catalog files: one per credential, plus one per
 	// realm. They describe the same channel, and keeping each copy would let a
 	// duplicated channel outvote the others in the union and list the same
@@ -159,6 +169,69 @@ func gatherProviderFacts(configDir string) map[string][]providerFacts {
 			deduped = append(deduped, channel)
 		}
 		out[id] = deduped
+	}
+	return out
+}
+
+// readPublicAliases returns provider -> upstream ID -> public ID. Missing or
+// unreadable config is not fatal: the existing raw-ID aggregation still works.
+func readPublicAliases(path string) map[string]map[string]string {
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return nil
+	}
+	var doc struct {
+		OAuth struct {
+			ModelAlias map[string][]struct {
+				Name  string `yaml:"name"`
+				Alias string `yaml:"alias"`
+			} `yaml:"model-alias"`
+		} `yaml:"oauth"`
+	}
+	if errUnmarshal := yaml.Unmarshal(raw, &doc); errUnmarshal != nil {
+		return nil
+	}
+	out := make(map[string]map[string]string, len(doc.OAuth.ModelAlias))
+	for provider, rows := range doc.OAuth.ModelAlias {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "" {
+			continue
+		}
+		for _, row := range rows {
+			name := strings.ToLower(strings.TrimSpace(row.Name))
+			alias := strings.ToLower(strings.TrimSpace(row.Alias))
+			if name == "" || alias == "" {
+				continue
+			}
+			if out[provider] == nil {
+				out[provider] = make(map[string]string)
+			}
+			out[provider][name] = alias
+		}
+	}
+	return out
+}
+
+// applyPublicAliases moves each channel opinion under the ID clients actually
+// see. Realm suffixes are stripped only for the lookup: workbuddy-cn and
+// qoder-intl both use the workbuddy/qoder alias channel.
+func applyPublicAliases(byModel map[string][]providerFacts, aliases map[string]map[string]string) map[string][]providerFacts {
+	if len(aliases) == 0 {
+		return byModel
+	}
+	out := make(map[string][]providerFacts, len(byModel))
+	for id, channels := range byModel {
+		for _, channel := range channels {
+			publicID := id
+			provider := strings.ToLower(strings.TrimSpace(channel.Provider))
+			if dash := strings.IndexByte(provider, '-'); dash >= 0 {
+				provider = provider[:dash]
+			}
+			if alias := aliases[provider][id]; alias != "" {
+				publicID = alias
+			}
+			out[publicID] = append(out[publicID], channel)
+		}
 	}
 	return out
 }

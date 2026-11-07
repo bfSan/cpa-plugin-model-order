@@ -161,7 +161,7 @@ func (s *capabilityStore) lookup(id string) (capability, bool) {
 // makes the listing a function of the current channel table, so no refresh order
 // can undo it. Callers hold the read lock.
 func (s *capabilityStore) overrideWithChannels(key string, facts capability) capability {
-	channels := s.channels[key]
+	channels := s.channels[strings.ToLower(key)]
 	if len(channels) < 2 {
 		// A single channel already describes the model accurately.
 		return facts

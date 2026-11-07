@@ -321,3 +321,52 @@ func TestAggregationSurvivesCatalogRefresh(t *testing.T) {
 		}
 	}
 }
+
+// Provider catalogs use internal IDs while /v1/models serves oauth aliases.
+// Without applying that table first, qwen3.8-max flips between qoder's medium
+// and Trae's high whenever registration order changes instead of exposing both.
+func TestGatherAppliesOAuthAliasesBeforeUnion(t *testing.T) {
+	dir := t.TempDir()
+	oldAuthDir, oldConfigPath := authDir, cpaConfigPath
+	authDir = filepath.Join(dir, "auths")
+	cpaConfigPath = filepath.Join(dir, "config.yaml")
+	t.Cleanup(func() {
+		authDir = oldAuthDir
+		cpaConfigPath = oldConfigPath
+	})
+
+	qoderDir := filepath.Join(dir, "CLIProxyAPI", "qoder", "model-catalog")
+	if err := os.MkdirAll(qoderDir, 0o755); err != nil {
+		t.Fatalf("setup qoder: %v", err)
+	}
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("setup trae: %v", err)
+	}
+	qoder := `{"region":"cn","models":[{"ID":"qmodel_38max"}],"region_facts":{"qmodel_38max":{"context_length":1000000,"thinking":{"levels":["low","medium","xhigh"]}}}}`
+	trae := `{"provider":"trae","auth":{"variant":"cn"},"model_cache":{"realm":"cn","models":[{"ID":"qwen3.8-max","ContextLength":1000000,"Thinking":{"Levels":["high","low","xhigh"]}}]}}`
+	config := "oauth:\n  model-alias:\n    qoder:\n      - name: qmodel_38max\n        alias: qwen3.8-max\n"
+	if err := os.WriteFile(filepath.Join(qoderDir, "catalog.json"), []byte(qoder), 0o644); err != nil {
+		t.Fatalf("write qoder: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "trae.json"), []byte(trae), 0o644); err != nil {
+		t.Fatalf("write trae: %v", err)
+	}
+	if err := os.WriteFile(cpaConfigPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	channels := gatherProviderFacts(dir)["qwen3.8-max"]
+	if len(channels) != 2 {
+		t.Fatalf("channels = %+v, want qoder and trae under the public alias", channels)
+	}
+	_, levels := aggregateChannels(channels)
+	want := []string{"low", "medium", "high", "xhigh"}
+	if len(levels) != len(want) {
+		t.Fatalf("levels = %v, want %v", levels, want)
+	}
+	for i := range want {
+		if levels[i] != want[i] {
+			t.Fatalf("levels = %v, want %v", levels, want)
+		}
+	}
+}
